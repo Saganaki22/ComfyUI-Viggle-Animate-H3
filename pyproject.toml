@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-viggle-animate-h3"
+version = "1.0.0"
+description = "ComfyUI nodes for Viggle-Animate (MiniMax-H3 ref2va finetune): character replacement in video from a driving clip and a reference still"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3"
+
+[tool.comfy]
+PublisherId = "saganaki22"
+DisplayName = "ComfyUI-Viggle-Animate-H3"
+Icon = "https://avatars.githubusercontent.com/u/84208527"

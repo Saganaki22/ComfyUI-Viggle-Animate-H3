@@ -70,10 +70,10 @@ class ViggleAnimateConditioning:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE (from the base model). Encodes the driving clip and the reference still."}),
             "cond_video": ("IMAGE", {"tooltip": "Driving video frames at 24 fps (Load Video node). Supplies motion, camera, background, lighting."}),
             "ref_image": ("IMAGE", {"tooltip": "Single still of the person to place in the video."}),
             "text_cond": ("TEXT_COND", {"tooltip": "From the Load Text Conditioning node."}),
+            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE (from the base model). Encodes the driving clip and the reference still."}),
             "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
                               "tooltip": "Target width. 0 = driving clip's own width (the evaluated configuration)."}),
             "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
@@ -89,7 +89,7 @@ class ViggleAnimateConditioning:
     DESCRIPTION = ("Viggle-Animate conditioning: frozen text embed + video-first nested references. "
                    "Pair with MiniMaxH3SigmaShift (shift 3) and 4 sampling steps.")
 
-    def build(self, vae, cond_video, ref_image, text_cond, width, height, length):
+    def build(self, cond_video, ref_image, text_cond, vae, width, height, length):
         # ---- frozen text conditioning -------------------------------------
         prompt_embeds = text_cond["prompt_embeds"]      # [1, 362, 5120] bf16
         text_token_tags = text_cond["text_token_tags"]  # [362] int64
