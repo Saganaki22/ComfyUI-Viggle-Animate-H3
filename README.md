@@ -1,5 +1,7 @@
 # ComfyUI-Viggle-Animate-H3
 
+**[English](README.md) | [中文](README_zh.md)**
+
 ComfyUI nodes for **[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** — a 33.1 B
 full finetune of MiniMax-H3's `ref2va` transformer for **character replacement in video**: it
 takes a driving video and a reference still, and re-renders the performer(s) in the clip as the
@@ -34,24 +36,24 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 
 | File | Size | Notes |
 |---|---|---|
-| `minimax_h3_ref2va_viggle_bf16.safetensors` | 66.3 GB | Full precision — needs ≥ 96 GB VRAM or offloading |
-| `minimax_h3_ref2va_viggle_int8_convrot.safetensors` | 46.3 GB | int8 weights (convrot-quantized) |
-| `minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors` | 20.3 GB | + low-rank `adaln_proj` — **fits a 32 GB card, recommended** |
+| [minimax_h3_ref2va_viggle_bf16.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_bf16.safetensors) | 66.3 GB | Full precision — needs ≥ 96 GB VRAM or offloading |
+| [minimax_h3_ref2va_viggle_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_int8_convrot.safetensors) | 46.3 GB | int8 weights (convrot-quantized) |
+| [minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors) | 20.3 GB | + low-rank `adaln_proj` — **fits a 32 GB card, recommended** |
 
 **DMD LoRAs** → `ComfyUI/models/loras/` (the distilled delta that collapses sampling to 4 steps —
 required; it is a delta on the *finetuned* transformer, not the stock MiniMax one)
 
 | File | Size | Notes |
 |---|---|---|
-| `viggle_animate_dmd_lora.safetensors` | 3.5 GB | Original rank 128, exact conversion |
-| `viggle_animate_dmd_lora_r64.safetensors` | 0.88 GB | SVD-truncated, 99.26% spectral energy |
-| `viggle_animate_dmd_lora_r29.safetensors` | 0.40 GB | SVD-truncated, 98.2% spectral energy |
+| [viggle_animate_dmd_lora.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora.safetensors) | 3.5 GB | Original rank 128, exact conversion |
+| [viggle_animate_dmd_lora_r64.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r64.safetensors) | 0.88 GB | SVD-truncated, 99.26% spectral energy |
+| [viggle_animate_dmd_lora_r29.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r29.safetensors) | 0.40 GB | SVD-truncated, 98.2% spectral energy |
 
 **Frozen text conditioning** → `ComfyUI/models/text_cond/`
 
 | File | Notes |
 |---|---|
-| `fixed_embed_fwd_anyframe.safetensors` | The frozen 362-token embedding — replaces the text encoder entirely |
+| [fixed_embed_fwd_anyframe.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/text_cond/fixed_embed_fwd_anyframe.safetensors) | The frozen 362-token embedding — replaces the text encoder entirely |
 
 **VAEs** (from the base model, not the finetune) → `ComfyUI/models/vae/`
 from [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
