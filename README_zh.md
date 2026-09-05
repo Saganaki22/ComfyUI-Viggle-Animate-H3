@@ -104,6 +104,6 @@ Load Text Conditioning (Viggle) --------------+                            KSamp
 - **权重**是 MiniMax H3 的模型衍生品 ——
   [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3)
   适用于它们(在再分发或用于产品之前请阅读)。这包括上面链接的转换/量化变体。
-- 本**节点包**采用 MIT 许可(见 `LICENSE`)。
+- 本**节点包**采用 Apache 2.0 许可(见 `LICENSE`)。
 - 该模型可以将人物放入其未参与拍摄的视频中;身份来自你提供的图片。
   请勿在未获同意的人身上使用,并将生成内容标注为 AI 生成(见原始仓库的 intended-use 部分)。
