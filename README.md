@@ -90,7 +90,7 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 - Custom nodes required: [ComfyUI-Viggle-Animate-H3](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3) (Viggle Animate Conditioning + Load Text Conditioning) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) (fast preview).
 - **Load Video**: set `frame_load_cap` equal to the conditioning node's `length` (e.g. 124) and `force_rate` to 24.
 - Output resolution follows the driving video by default; set the conditioning node's `width`/`height` to override (each axis rounds to 32), or pre-scale the clip with **Scale Image to Total Pixels**. Tested canvas range: **0.4–0.98 MP**.
-- Sampler: euler, er_sde, exp_heun_2_x0, simple, normal, beta, 4-8 steps, cfg 1.0, ModelSamplingMiniMaxH3 shift 3.0.
+- Sampler: euler, er_sde, exp_heun_2_x0, lcm, simple, normal, beta, bong_tangent, 4-8 steps, cfg 1.0, ModelSamplingMiniMaxH3 shift 3.0.
 - Stacks with **Comfy Kitchen** and **block sparse attention** patches.
 
 ## Limitations
