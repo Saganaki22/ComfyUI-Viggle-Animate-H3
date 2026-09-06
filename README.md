@@ -4,6 +4,7 @@
 
 <img width="731" height="468" alt="Screenshot 2026-09-05 214633" src="https://github.com/user-attachments/assets/1b65c73d-555e-4097-a2de-7ae2f5e6851f" />
 
+<br>
 
 ComfyUI nodes for **[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** — a 33.1 B
 full finetune of MiniMax-H3's `ref2va` transformer for **character replacement in video**: it
