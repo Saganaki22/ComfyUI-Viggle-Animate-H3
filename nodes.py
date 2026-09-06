@@ -3,7 +3,6 @@ import copy
 import hashlib
 import logging
 import math
-import os
 import weakref
 
 import torch
@@ -12,37 +11,32 @@ import folder_paths
 import comfy.model_management
 import comfy.nested_tensor
 import comfy.sample
+import comfy.samplers
 import comfy.utils
 import latent_preview
 from comfy_extras import nodes_minimax_h3 as core_h3
+from comfy_extras import nodes_custom_sampler as core_sampler
 
 CANVAS_MULTIPLE = 32
 FPS = 24
 MIN_ASPECT, MAX_ASPECT = 1 / 4, 4
 
-# Encoded reference latents are deterministic per (content, canvas, frames, VAE);
-# caching them lets repeat runs skip the video-VAE encode (the multi-second stall).
-# Cap is generous on purpose: a windowed run needs chunks+1 entries, and the total
-# bytes self-limit — the windows sum to roughly one full clip's latent, which the
-# workflow itself is already holding.
 _LATENT_CACHE = collections.OrderedDict()
 _CACHE_MAX = 64
+_LATENT_CACHE_MAX_BYTES = 256 * 1024 ** 2
 
 
 def _fingerprint(t, extra):
-    """Content key: shape + dtype + strided pixel sample + global checksum.
-
-    The full-tensor sum makes any content change a cache miss; the strided
-    byte sample pins down which arrangement produced it. ~0.3 s at 1.4 GB,
-    versus the multi-second VAE encode it gates.
-    """
-    h = hashlib.sha1(repr((tuple(t.shape), str(t.dtype), extra)).encode())
-    h.update(t.sum(dtype=torch.float64).item().hex().encode())
-    fs = max(1, t.shape[0] // 8)   # <= 9 frames
-    hs = max(1, t.shape[1] // 24)  # ~24x24 px per sampled frame
-    ws = max(1, t.shape[2] // 24)
-    s = t[::fs, ::hs, ::ws, :]
-    h.update(s.detach().cpu().contiguous().numpy().tobytes())
+    """Hash all content, copying at most a slab at a time for non-CPU inputs."""
+    h = hashlib.sha256(repr((tuple(t.shape), str(t.dtype), extra)).encode())
+    if t.numel() == 0:
+        return h.digest()
+    rows = t.detach().reshape(1) if t.ndim == 0 else t.detach()
+    row_bytes = math.prod(rows.shape[1:]) * rows.element_size()
+    step = max(1, (8 * 1024 ** 2) // max(1, row_bytes))
+    for start in range(0, rows.shape[0], step):
+        slab = rows[start:start + step].cpu().contiguous().view(torch.uint8)
+        h.update(memoryview(slab.numpy()).cast("B"))
     return h.digest()
 
 
@@ -51,17 +45,26 @@ def _cache_get(key, vae):
     if ent is None:
         return None
     ref, val = ent
-    if ref() is not vae:           # stale id from a freed VAE
+    if ref() is not vae:
+        del _LATENT_CACHE[key]
         return None
     _LATENT_CACHE.move_to_end(key)
     return val.clone()
 
 
 def _cache_put(key, vae, val):
-    _LATENT_CACHE[key] = (weakref.ref(vae), val.clone())
-    _LATENT_CACHE.move_to_end(key)
-    while len(_LATENT_CACHE) > _CACHE_MAX:
-        _LATENT_CACHE.popitem(last=False)
+    _LATENT_CACHE.pop(key, None)
+    size = val.numel() * val.element_size()
+    if size > _LATENT_CACHE_MAX_BYTES:
+        return
+    for old_key, (ref, _) in list(_LATENT_CACHE.items()):
+        if ref() is None:
+            del _LATENT_CACHE[old_key]
+    total = sum(t.numel() * t.element_size() for _, t in _LATENT_CACHE.values())
+    while _LATENT_CACHE and (total + size > _LATENT_CACHE_MAX_BYTES or len(_LATENT_CACHE) >= _CACHE_MAX):
+        _, (_, old) = _LATENT_CACHE.popitem(last=False)
+        total -= old.numel() * old.element_size()
+    _LATENT_CACHE[key] = (weakref.ref(vae), val.detach().cpu().clone())
 
 
 def resolve_canvas(aspect_w, aspect_h, short_edge, max_pixels):
@@ -137,7 +140,7 @@ class ViggleAnimateConditioning:
     FUNCTION = "build"
     CATEGORY = "conditioning/viggle"
     DESCRIPTION = ("Viggle-Animate conditioning: frozen text embed + video-first nested references. "
-                   "Pair with MiniMaxH3SigmaShift (shift 3) and 4-8 sampling steps.")
+                   "Pair with MiniMaxH3SigmaShift (video/audio shift 3). The upstream four-point sigma schedule uses three Euler updates.")
 
     def build(self, cond_video, ref_image, text_cond, vae, width, height, length):
         # ---- frozen text conditioning -------------------------------------
@@ -246,59 +249,69 @@ _CHUNK_CACHE = collections.OrderedDict()
 _CHUNK_CACHE_MAX_BYTES = 2 * 1024 ** 3
 
 
-def _sampler_fp(sampler):
-    fn = getattr(sampler, "sampler_function", None)
-    if fn is not None:
-        params = getattr(sampler, "sampler_params", {}) or {}
-        return repr((getattr(fn, "__name__", str(fn)),
-                     sorted((k, repr(v)) for k, v in params.items())))
-    inner = getattr(sampler, "sampler_object", None)
-    return repr((type(sampler).__name__, type(inner).__name__ if inner is not None else None))
+def _hash_cache_value(h, value):
+    """Return False for opaque state whose changes cannot be tracked safely."""
+    if isinstance(value, torch.Tensor):
+        h.update(b"tensor" + _fingerprint(value, ()))
+    elif isinstance(value, dict):
+        if any(type(k) is not str for k in value):
+            return False
+        h.update(b"dict[")
+        for k in sorted(value):
+            if not _hash_cache_value(h, k) or not _hash_cache_value(h, value[k]):
+                return False
+        h.update(b"]")
+    elif type(value) in (list, tuple):
+        h.update(type(value).__name__.encode() + b"[")
+        for item in value:
+            if not _hash_cache_value(h, item):
+                return False
+        h.update(b"]")
+    elif type(value) in (set, frozenset) and not value:
+        h.update(b"empty-set")
+    elif value is None or type(value) in (bool, int, float, str, bytes):
+        encoded = repr((type(value).__name__, value)).encode()
+        h.update(str(len(encoded)).encode() + b":" + encoded)
+    else:
+        return False
+    return True
 
 
-def _chunk_cache_get(key, model):
+def _chunk_cache_get(key, owners):
     ent = _CHUNK_CACHE.get(key)
     if ent is None:
         return None
-    ref, val = ent
-    if ref() is not model:         # model/LoRA/patch changed -> stale id
+    refs, val = ent
+    if any(ref() is not owner for ref, owner in zip(refs, owners)):
+        del _CHUNK_CACHE[key]
         return None
     _CHUNK_CACHE.move_to_end(key)
     return (val[0].clone(), val[1].clone())
 
 
-def _chunk_cache_put(key, model, v_half, a_half):
-    _CHUNK_CACHE[key] = (weakref.ref(model), (v_half.clone(), a_half.clone()))
-    _CHUNK_CACHE.move_to_end(key)
-    total = sum(v[1][0].numel() + v[1][1].numel() for v in _CHUNK_CACHE.values())
-    while total > _CHUNK_CACHE_MAX_BYTES and len(_CHUNK_CACHE) > 1:
+def _chunk_cache_put(key, owners, video, audio):
+    if key is None:
+        return
+    _CHUNK_CACHE.pop(key, None)
+    size = sum(t.numel() * t.element_size() for t in (video, audio))
+    if size > _CHUNK_CACHE_MAX_BYTES:
+        return
+    for old_key, (refs, _) in list(_CHUNK_CACHE.items()):
+        if any(ref() is None for ref in refs):
+            del _CHUNK_CACHE[old_key]
+    total = sum(t.numel() * t.element_size() for _, pair in _CHUNK_CACHE.values() for t in pair)
+    while _CHUNK_CACHE and total + size > _CHUNK_CACHE_MAX_BYTES:
         _, (_, old) = _CHUNK_CACHE.popitem(last=False)
-        total -= old[0].numel() + old[1].numel()
-
-
-def _raw_conds(guider):
-    """The guider's (positive, negative) in the form set_conds accepts.
-
-    negative is None for a BasicGuider, whose set_conds takes ONE argument.
-    """
-    if hasattr(guider, "raw_conds"):
-        return guider.raw_conds
-    conds = getattr(guider, "original_conds", None) or {}
-    return (conds.get("positive"), conds.get("negative"))
+        total -= sum(t.numel() * t.element_size() for t in old)
+    _CHUNK_CACHE[key] = (tuple(weakref.ref(owner) for owner in owners),
+                         (video.detach().cpu().clone(), audio.detach().cpu().clone()))
 
 
 def _chunk_guider(guider, positive):
     """The wired guider with its POSITIVE replaced by this chunk's conditioning."""
     new_g = copy.copy(guider)
-    # SHALLOW copy shares original_conds; set_conds assigns into it. Rebind
-    # before touching it or chunk 0 clobbers the base conditioning.
-    new_g.original_conds = dict(getattr(guider, "original_conds", None) or {})
-    _, negative = _raw_conds(guider)
-    if negative is None:
-        new_g.set_conds(positive)
-    else:
-        new_g.set_conds(positive, negative)
-    new_g.raw_conds = (positive, negative)
+    new_g.original_conds = dict(guider.original_conds)
+    new_g.inner_set_conds({"positive": positive})
     return new_g
 
 
@@ -308,18 +321,15 @@ class ViggleAnimateConditioningWindowed:
     Splits the driving clip into overlapping 17j+5 windows (default 124 frames —
     the finetune's evaluated chunk length) and emits one conditioning entry per
     window: the window's OWN footage as the video reference, plus the still,
-    broadcast unchanged to every chunk. Pair with Viggle Chunked Sampler, which
-    renders each chunk independently and crossfades the overlaps in pixel space.
-
-    One still covers every chunk — identity-only conditioning; pose always comes
-    from the footage.
+    broadcast unchanged to every chunk. Viggle Chunked Sampler carries prior
+    output into each overlap and decodes the assembled latent once.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "cond_video": ("IMAGE", {"tooltip": "The WHOLE driving clip at 24 fps. Its (grid-snapped) length IS the output length — cut the tail off with Load Video's frame_load_cap if you want shorter."}),
-            "ref_image": ("IMAGE", {"tooltip": "Single still of the person. Identity-only conditioning — pose comes from each chunk's own footage, so one still covers every chunk and need not match any frame's pose."}),
+            "ref_image": ("IMAGE", {"tooltip": "Reference still shared by all chunks. A repainted frame from the driving shot with matching pose and framing gives the strongest reference."}),
             "text_cond": ("TEXT_COND", {"tooltip": "From the Load Text Conditioning node."}),
             "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE (from the base model)."}),
             "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
@@ -329,7 +339,7 @@ class ViggleAnimateConditioningWindowed:
             "chunk_frames": ("INT", {"default": 124, "min": 39, "max": 3600, "step": 17,
                                      "tooltip": "Render length per chunk, frames at 24 fps. 124 is the finetune's evaluated operating point — every chunk runs at exactly this length."}),
             "overlap_frames": ("INT", {"default": 22, "min": 5, "max": 3600, "step": 17,
-                                       "tooltip": "Frames shared by consecutive windows. Both renders of the overlap are blended, so this is also the default crossfade length."}),
+                                       "tooltip": "Overlap carried from the preceding chunk and preserved during sampling. The final window may overlap more to reach the clip's end."}),
         }}
 
     RETURN_TYPES = ("VIGGLE_COND_SET", "CONDITIONING")
@@ -337,7 +347,7 @@ class ViggleAnimateConditioningWindowed:
     FUNCTION = "build"
     CATEGORY = "conditioning/viggle"
     DESCRIPTION = ("Viggle-Animate conditioning, windowed: per-chunk driving-video references "
-                   "for the Viggle Chunked Sampler. Long clips in, one still, no flicker.")
+                   "for the Viggle Chunked Sampler. Carries overlap to improve continuity across long clips.")
 
     def build(self, cond_video, ref_image, text_cond, vae, width, height,
               chunk_frames, overlap_frames):
@@ -421,12 +431,13 @@ class ViggleChunkedSampler:
     Chunk i's tail latents are written into a master latent and chunk i+1
     samples with a denoise_mask that PINS the overlap to that content (the
     model sees the carried rows as context at its cond timestep — core #15375).
-    The seam is content-continuous by construction: no pixel blending, no
-    ghosting. The master decodes once at the end.
+    The master decodes once at the end. Preserving overlap improves continuity;
+    motion and appearance in newly generated frames can still change at joins.
 
     Chunks are chained: chunk i+1 carries from chunk i, so cache keys chain
     too. Re-rendering chunk k (rerender_chunk + rerender_seed) re-renders
-    k..end; chunks before k serve from cache.
+    k..end; earlier chunks can serve from the bounded cache. Opaque custom
+    sampling state bypasses the cache.
 
     Takes the same NOISE / GUIDER / SAMPLER / SIGMAS objects as Sampler Custom
     Advanced — the guider's positive is swapped per chunk from the cond_set.
@@ -444,7 +455,7 @@ class ViggleChunkedSampler:
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                              "tooltip": "Base seed. Chunk i renders with seed + i, so the chunks vary independently while staying reproducible."}),
             "rerender_chunk": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1,
-                                       "tooltip": "1-based chunk number to re-render (0 = off). Chunks BEFORE it come from cache; it and every later chunk re-render (they carry from it)."}),
+                                       "tooltip": "1-based chunk number to change (0 = off). Set a new rerender_seed to regenerate it and the following chunks; earlier chunks reuse cache when available."}),
             "rerender_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                                       "tooltip": "Seed for the chunk selected by rerender_chunk. Type a new number for a new take."}),
         }}
@@ -453,11 +464,16 @@ class ViggleChunkedSampler:
     RETURN_NAMES = ("frames", "chunk_map")
     FUNCTION = "sample"
     CATEGORY = "sampling/viggle"
-    DESCRIPTION = ("Chunked Viggle-Animate sampler: latent-carry chunking, seamless joins, "
+    DESCRIPTION = ("Chunked Viggle-Animate sampler: latent carry for continuity, "
                    "per-chunk cache and re-render.")
 
     def sample(self, noise, guider, sampler, sigmas, cond_set, vae, seed,
                rerender_chunk, rerender_seed):
+        if not torch.isfinite(sigmas).all() or (sigmas[:-1] <= 0).any() or (sigmas < 0).any():
+            raise ValueError("Viggle Chunked Sampler: sigmas must be finite and positive except for "
+                             "the final zero. A zero before the final point causes division by zero. "
+                             "For the upstream schedule use ManualSigmas: 1.0, 0.8571428571428571, "
+                             "0.6, 0.0. In KJNodes CustomSigmas set interpolate_to_steps to 3, not 4.")
         windows = cond_set["spans"]      # (a, b, lat0, latn)
         conds = cond_set["conds"]
         if len(windows) != len(conds) or not conds:
@@ -467,6 +483,8 @@ class ViggleChunkedSampler:
         total_lat = _frames_to_latents(total_f)
         total_a = round(total_f / FPS * 40)
         model = guider.model_patcher
+        owners = (model, noise, guider, sampler)
+        sampling_key = self._sampling_key(noise, guider, sampler)
         dev = comfy.model_management.intermediate_device()
 
         master_v = torch.zeros([1, 24, total_lat, ch // 16, cw // 16], device=dev)
@@ -475,25 +493,28 @@ class ViggleChunkedSampler:
         pbar = comfy.utils.ProgressBar(len(windows))
         chunk_map = ["%d chunks, %d frames (%.1fs) at %dx%d — rerender_chunk is 1-based:"
                      % (len(windows), total_f, total_f / FPS, ch, cw)]
+        if sampling_key is None:
+            chunk_map.append("Chunk reuse disabled: custom sampling state cannot be checked.")
         prev_key = b""
         prev_end = None
         for i, (a, b, lat0, latn) in enumerate(windows):
             seed_i = int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i
+            seed_i %= 1 << 64
             carry = 0 if prev_end is None else max(0, prev_end - lat0)
             chunk_map.append("#%d: frames %d-%d (%.1f-%.1fs) seed %d carry %d lat"
                              % (i + 1, a, b, a / FPS, (b + 1) / FPS, seed_i, carry))
-            key = self._chunk_key(prev_key, conds[i], seed_i, ch, cw, latn,
-                                  sigmas, sampler, guider)
-            cached = _chunk_cache_get(key, model)
+            key = self._chunk_key(prev_key, sampling_key, conds[i], seed_i, ch, cw,
+                                  (a, b, lat0, latn, carry), sigmas)
+            cached = _chunk_cache_get(key, owners)
+            chunk_map[-1] += " [cached]" if cached is not None else " [rendered]"
             if cached is None:
                 out_v, out_a = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
                                                   seed_i, ch, cw, a, b, lat0, latn,
                                                   carry, master_v, master_a)
-                _chunk_cache_put(key, model, out_v, out_a)
+                _chunk_cache_put(key, owners, out_v, out_a)
             else:
                 out_v, out_a = cached
-                lat0_i = lat0
-                master_v[:, :, lat0_i:lat0_i + latn] = out_v.to(dev)
+                master_v[:, :, lat0:lat0 + latn] = out_v.to(dev)
                 a0 = min(round(a / FPS * 40), total_a)
                 a1 = min(round((b + 1) / FPS * 40), total_a)
                 master_a[:, :, :, a0:a1] = out_a.to(dev)
@@ -535,19 +556,45 @@ class ViggleChunkedSampler:
             out_v, out_a = out.unbind()
         else:
             out_v, out_a = out, None
+        for name, latent in (("video", out_v), ("audio", out_a)):
+            if latent is not None and not torch.isfinite(latent).all():
+                raise RuntimeError(f"Viggle Chunked Sampler: frames {a}-{b} produced NaN/Inf {name} "
+                                   "latents. Stopped before caching or carrying them into the next chunk. "
+                                   "Check the sigma schedule and model/attention settings.")
         master_v[:, :, lat0:lat0 + latn] = out_v
         master_a[:, :, :, a0:a1] = out_a
-        return out_v.half().cpu(), out_a.half().cpu()
+        return out_v.cpu(), out_a.cpu()
 
-    def _chunk_key(self, prev_key, cond, seed_i, ch, cw, latn, sigmas, sampler, guider):
-        refs = cond[0][1]["minimax_refs"]
-        h = hashlib.sha1()
+    def _sampling_key(self, noise, guider, sampler):
+        # Only the stock implementations have a known state contract. Custom
+        # objects still sample normally, but are not safe to reuse across runs.
+        if (type(noise) not in (core_sampler.Noise_RandomNoise, core_sampler.Noise_EmptyNoise)
+                or type(guider) not in (core_sampler.Guider_Basic, comfy.samplers.CFGGuider)
+                or type(sampler) is not comfy.samplers.KSAMPLER):
+            return None
+        model = guider.model_patcher
+        if set(model.object_patches) - {"model_sampling"}:
+            return None
+        other_conds = {name: [{k: v for k, v in entry.items() if k != "uuid"} for entry in entries]
+                       for name, entries in guider.original_conds.items() if name != "positive"}
+        sampling = model.get_model_object("model_sampling")
+        h = hashlib.sha256()
+        state = (vars(noise), guider.cfg, other_conds, sampler.extra_options, sampler.inpaint_options,
+                 guider.model_options, vars(sampling), str(model.patches_uuid),
+                 model.attachments, model.additional_models, model.callbacks, model.wrappers,
+                 model.injections, model.hook_patches, model.weight_wrapper_patches)
+        if not _hash_cache_value(h, state):
+            return None
+        return h.digest()
+
+    def _chunk_key(self, prev_key, sampling_key, cond, seed_i, ch, cw, span, sigmas):
+        if prev_key is None or sampling_key is None:
+            return None
+        h = hashlib.sha256()
         h.update(prev_key)
-        h.update(refs[0]["latent"].detach().cpu().contiguous().numpy().tobytes())
-        h.update(refs[1]["latent"].detach().cpu().contiguous().numpy().tobytes())
-        h.update(repr((seed_i, ch, cw, latn, _sampler_fp(sampler),
-                       float(getattr(guider, "cfg", 0) or 0))).encode())
-        h.update(sigmas.detach().cpu().float().numpy().tobytes())
+        h.update(sampling_key)
+        if not _hash_cache_value(h, (cond, seed_i, ch, cw, span, sigmas)):
+            return None
         return h.digest()
 
 
