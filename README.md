@@ -133,4 +133,4 @@ If you use the model in published work, cite the original:
 
 ## Report Issue
 
-- Weights/conversion issues: [ComfyUI-Viggle-Animate-H3/issues](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3/issues)
+- issues: [ComfyUI-Viggle-Animate-H3/issues](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3/issues)
