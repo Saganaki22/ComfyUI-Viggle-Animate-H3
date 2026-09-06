@@ -31,6 +31,12 @@ Everything else is ComfyUI core: **Load Diffusion Model**, **Load LoRA (Model On
 | <video src="https://github.com/user-attachments/assets/2529857c-2667-4641-9d2e-5dcb3c03913d" controls muted></video> | <img src="https://github.com/user-attachments/assets/f6adf969-03d5-4a58-bd30-5ec2d0bc604b" width="300"> | <video src="https://github.com/user-attachments/assets/deedde68-80de-47d2-9e1f-7eaa3bc35457" controls muted></video> |
 
 
+
+https://github.com/user-attachments/assets/701036d5-523a-4d95-a27e-a99011d62cf2
+
+
+
+
 ### euler / beta - 6-steps
 
 ## Install
