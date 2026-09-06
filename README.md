@@ -32,23 +32,9 @@ Everything else is ComfyUI core: **Load Diffusion Model**, **Load LoRA (Model On
 
 
 
-https://github.com/user-attachments/assets/701036d5-523a-4d95-a27e-a99011d62cf2
-
-
-
-https://github.com/user-attachments/assets/c5198b4c-9544-4e5a-bd1e-83ae4477bb0b
-
-
-
-https://github.com/user-attachments/assets/afb74de1-3d3d-42ae-9885-1d5b1c6e86af
-
-
-
-https://github.com/user-attachments/assets/5ddf1bb1-e744-406b-8b9f-2b729e4ecc4b
-
-
-
-https://github.com/user-attachments/assets/8d02389d-67ca-46f0-b9e3-78994d944a90
+| example_1 | example_2 | example_3 | example_4 |
+|:---:|:---:|:---:|:---:|
+| <video src="https://github.com/user-attachments/assets/c5198b4c-9544-4e5a-bd1e-83ae4477bb0b" controls muted></video> | <video src="https://github.com/user-attachments/assets/afb74de1-3d3d-42ae-9885-1d5b1c6e86af" controls muted></video> | <video src="https://github.com/user-attachments/assets/5ddf1bb1-e744-406b-8b9f-2b729e4ecc4b" controls muted></video> | <video src="https://github.com/user-attachments/assets/8d02389d-67ca-46f0-b9e3-78994d944a90" controls muted></video> |
 
 
 
