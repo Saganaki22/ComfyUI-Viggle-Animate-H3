@@ -440,8 +440,9 @@ class ViggleAnimateConditioningWindowed:
                            "latent": z_img.clone()}
             conds.append([[prompt_embeds, {"minimax_refs": [video_block, image_block],
                                            "minimax_token_tags": text_token_tags}]])
-            prompts.append(f"chunk {i}: frames {a}-{a + n - 1}")
-        logging.info("[ViggleAnimateConditioningWindowed] %d chunks over %d frames (%.2fs): %s",
+            prompts.append(f"chunk {i + 1}: frames {a}-{a + n - 1}")
+        logging.info("[ViggleAnimateConditioningWindowed] %d chunks over %d frames (%.2fs), "
+                     "rerender_chunk is 1-based: %s",
                      len(conds), total_f, total_f / FPS,
                      ", ".join(f"{a}-{b}" for a, b in spans))
 
@@ -485,8 +486,8 @@ class ViggleChunkedSampler:
                                          "tooltip": "Blend length across each overlap. Both sides tracked the same footage, so this morphs texture, not motion. Clamped to the overlap."}),
         }}
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("frames",)
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("frames", "chunk_map")
     FUNCTION = "sample"
     CATEGORY = "sampling/viggle"
     DESCRIPTION = ("Chunked Viggle-Animate sampler: independent full-length renders, "
@@ -504,9 +505,13 @@ class ViggleChunkedSampler:
 
         pbar = comfy.utils.ProgressBar(len(spans))
         frames_list = []
+        chunk_map = ["%d chunks, %d frames (%.1fs) at %dx%d — rerender_chunk is 1-based:"
+                     % (len(spans), total_f, total_f / FPS, ch, cw)]
         for i, (a, b) in enumerate(spans):
             n = b - a + 1
             seed_i = int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i
+            chunk_map.append("#%d: frames %d-%d (%.1f-%.1fs) seed %d"
+                             % (i + 1, a, b, a / FPS, (b + 1) / FPS, seed_i))
             key = self._chunk_key(conds[i], seed_i, ch, cw, n, sigmas, sampler, guider)
             fr = _chunk_cache_get(key, model)
             if fr is None:
@@ -524,7 +529,7 @@ class ViggleChunkedSampler:
             pbar.update(1)
 
         stitched = _stitch(frames_list, spans, int(crossfade_frames))
-        return (stitched / 255.0,)
+        return (stitched / 255.0, "\n".join(chunk_map))
 
     def _render_chunk(self, noise, guider, sampler, sigmas, cond, seed_i, ch, cw, n):
         lat_t = _frames_to_latents(n)
