@@ -37,6 +37,9 @@ Everything else is ComfyUI core: **Load Diffusion Model**, **Load LoRA (Model On
 | <video src="https://github.com/user-attachments/assets/c5198b4c-9544-4e5a-bd1e-83ae4477bb0b" controls muted></video> | <video src="https://github.com/user-attachments/assets/afb74de1-3d3d-42ae-9885-1d5b1c6e86af" controls muted></video> | <video src="https://github.com/user-attachments/assets/5ddf1bb1-e744-406b-8b9f-2b729e4ecc4b" controls muted></video> | <video src="https://github.com/user-attachments/assets/8d02389d-67ca-46f0-b9e3-78994d944a90" controls muted></video> |
 
 
+| example_5 | example_6 |
+|:---:|:---:|
+| <video src="https://github.com/user-attachments/assets/d4533465-705a-4487-8f14-04770c3d84b6" controls muted></video> | <video src="https://github.com/user-attachments/assets/e519cb64-18c3-4fa7-abe3-d5e57fc0b72e" controls muted></video> |
 
 
 ### euler / beta - 6-steps
@@ -90,7 +93,7 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 - Custom nodes required: [ComfyUI-Viggle-Animate-H3](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3) (Viggle Animate Conditioning + Load Text Conditioning) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) (fast preview).
 - **Load Video**: set `frame_load_cap` equal to the conditioning node's `length` (e.g. 124) and `force_rate` to 24.
 - Output resolution follows the driving video by default; set the conditioning node's `width`/`height` to override (each axis rounds to 32), or pre-scale the clip with **Scale Image to Total Pixels**. Tested canvas range: **0.4–0.98 MP**.
-- Sampler: euler, er_sde, exp_heun_2_x0, lcm, simple, normal, beta, bong_tangent, 4-8 steps, cfg 1.0, ModelSamplingMiniMaxH3 shift 3.0.
+- euler, er_sde, exp_heun_2_x0, lcm / simple, normal, beta, bong_tangent, 4-8 steps, cfg 1.0, ModelSamplingMiniMaxH3 shift 3.0.
 - Stacks with **Comfy Kitchen** and **block sparse attention** patches.
 
 ## Limitations
