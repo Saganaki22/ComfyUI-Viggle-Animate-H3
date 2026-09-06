@@ -1,4 +1,5 @@
 import collections
+import copy
 import hashlib
 import logging
 import math
@@ -10,7 +11,9 @@ import torch
 import folder_paths
 import comfy.model_management
 import comfy.nested_tensor
+import comfy.sample
 import comfy.utils
+import latent_preview
 from comfy_extras import nodes_minimax_h3 as core_h3
 
 CANVAS_MULTIPLE = 32
@@ -197,17 +200,156 @@ class ViggleAnimateConditioning:
         return (cond, latent)
 
 
+# ---------------------------------------------------------------------------
+# windowed (long-clip) tooling: schedule, conditioning, chunked sampler
+# ---------------------------------------------------------------------------
+
+def _frame_at_latent(k):
+    """First pixel frame covered by latent step k (FRAME_PER_TOKEN = 1,4,4,4,4)."""
+    return 17 * (k // 5) + (0, 1, 5, 9, 13)[k % 5]
+
+
+def _frames_to_latents(fc):
+    return 2 if fc <= 5 else ((fc - 5) // 17) * 5 + 2
+
+
+def plan_spans(total_f, chunk_f, overlap_f):
+    """Static window schedule in frames.
+
+    Full 17j+5 windows laid at a stride that keeps every start on latent phase
+    0; the LAST window starts flush at total-chunk, so every render runs at the
+    trained chunk length and the slack becomes extra overlap with the window
+    before it. Returns [(first_frame, last_frame), ...] covering 0..total_f-1.
+    """
+    L = _frames_to_latents(int(chunk_f))
+    total_lat = _frames_to_latents(int(total_f))
+    if L < 7:
+        raise ValueError("Viggle-Animate: chunk_frames must be at least 22 frames (124 recommended).")
+    if L >= total_lat:
+        return [(0, int(total_f) - 1)]
+    O = _frames_to_latents(max(5, int(overlap_f)))
+    O = max(2, min(O, L - 5))          # stride stays a multiple of 5 (phase 0)
+    stride = L - O
+    starts = list(range(0, total_lat - L + 1, stride))
+    last = total_lat - L
+    if starts[-1] != last:
+        starts.append(last)
+    return [(_frame_at_latent(s), _frame_at_latent(s + L) - 1) for s in starts]
+
+
+def _stitch(frames_list, spans, crossfade):
+    """Blend chunk renders across their footage overlaps into one clip.
+
+    Both renders of an overlap frame tracked the same driving footage, so the
+    blend morphs texture, not motion. Ramp weights are complementary, so every
+    blended frame is an exact convex combination of the two renders.
+    """
+    if len(frames_list) == 1:
+        return frames_list[0].float()
+    if not int(crossfade):  # hard cut: each chunk owns its frames up to the next start
+        parts = [frames_list[i][:spans[i + 1][0] - spans[i][0]]
+                 for i in range(len(frames_list) - 1)]
+        parts.append(frames_list[-1])
+        return torch.cat(parts)
+    total_f = spans[-1][1] + 1
+    out = torch.zeros(total_f, *frames_list[0].shape[1:], dtype=torch.float32)
+    wsum = torch.zeros(total_f, 1, 1, 1, dtype=torch.float32)
+    for i, (fr, (a, b)) in enumerate(zip(frames_list, spans)):
+        w = torch.ones(fr.shape[0], dtype=torch.float32)
+        if i > 0:  # fade in over this window's first frames
+            c = min(int(crossfade), fr.shape[0], spans[i - 1][1] - a + 1)
+            if c > 0:
+                w[:c] = torch.linspace(0.0, 1.0, c + 2)[1:-1]
+        if i < len(frames_list) - 1:  # ownership ends where the NEXT window begins:
+            # zero past the blend window first, then ramp down across it — the
+            # ramps of both chunks occupy the same global frames even when the
+            # overlap is wider than the crossfade, so their weights sum to 1
+            a_next = spans[i + 1][0]
+            local = a_next - a
+            w[local:] = 0.0
+            c = min(int(crossfade), b - a_next + 1, fr.shape[0] - local)
+            if c > 0:
+                w[local:local + c] = torch.linspace(1.0, 0.0, c + 2)[1:-1]
+        w = w.view(-1, 1, 1, 1)
+        out[a:b + 1] += fr.float() * w
+        wsum[a:b + 1] += w
+    return out / wsum
+
+
+# Rendered-chunk cache: chunk frames are a pure function of (footage window,
+# still, chunk seed, schedule, sampler, cfg, model). Re-queueing with only
+# rerender_chunk/rerender_seed changed re-renders exactly that one chunk.
+_CHUNK_CACHE = collections.OrderedDict()
+_CHUNK_CACHE_MAX_BYTES = 2 * 1024 ** 3
+
+
+def _sampler_fp(sampler):
+    fn = getattr(sampler, "sampler_function", None)
+    if fn is not None:
+        params = getattr(sampler, "sampler_params", {}) or {}
+        return repr((getattr(fn, "__name__", str(fn)),
+                     sorted((k, repr(v)) for k, v in params.items())))
+    inner = getattr(sampler, "sampler_object", None)
+    return repr((type(sampler).__name__, type(inner).__name__ if inner is not None else None))
+
+
+def _chunk_cache_get(key, model):
+    ent = _CHUNK_CACHE.get(key)
+    if ent is None:
+        return None
+    ref, val = ent
+    if ref() is not model:         # model/LoRA/patch changed -> stale id
+        return None
+    _CHUNK_CACHE.move_to_end(key)
+    return val.clone()
+
+
+def _chunk_cache_put(key, model, frames_u8):
+    _CHUNK_CACHE[key] = (weakref.ref(model), frames_u8.clone())
+    _CHUNK_CACHE.move_to_end(key)
+    total = sum(v[1].numel() for v in _CHUNK_CACHE.values())
+    while total > _CHUNK_CACHE_MAX_BYTES and len(_CHUNK_CACHE) > 1:
+        _, (_, old) = _CHUNK_CACHE.popitem(last=False)
+        total -= old.numel()
+
+
+def _raw_conds(guider):
+    """The guider's (positive, negative) in the form set_conds accepts.
+
+    negative is None for a BasicGuider, whose set_conds takes ONE argument.
+    """
+    if hasattr(guider, "raw_conds"):
+        return guider.raw_conds
+    conds = getattr(guider, "original_conds", None) or {}
+    return (conds.get("positive"), conds.get("negative"))
+
+
+def _chunk_guider(guider, positive):
+    """The wired guider with its POSITIVE replaced by this chunk's conditioning."""
+    new_g = copy.copy(guider)
+    # SHALLOW copy shares original_conds; set_conds assigns into it. Rebind
+    # before touching it or chunk 0 clobbers the base conditioning.
+    new_g.original_conds = dict(getattr(guider, "original_conds", None) or {})
+    _, negative = _raw_conds(guider)
+    if negative is None:
+        new_g.set_conds(positive)
+    else:
+        new_g.set_conds(positive, negative)
+    new_g.raw_conds = (positive, negative)
+    return new_g
+
+
 class ViggleAnimateConditioningWindowed:
-    """Windowed Viggle-Animate conditioning for MMH3Tools' Looping Sampler.
+    """Windowed Viggle-Animate conditioning for long driving clips.
 
-    Emits an MMH3_COND_SET: one conditioning entry per chunk, each carrying the
-    driving clip's OWN span as its video reference (cut on the looping sampler's
-    schedule, so chunk i is conditioned on the footage it renders) plus the still,
-    broadcast unchanged to every chunk. The latent output is the whole clip.
+    Splits the driving clip into overlapping 17j+5 windows (default 124 frames —
+    the finetune's evaluated chunk length) and emits one conditioning entry per
+    window: the window's OWN footage as the video reference, plus the still,
+    broadcast unchanged to every chunk. Pair with Viggle Chunked Sampler, which
+    renders each chunk independently and crossfades the overlaps in pixel space.
 
-    Requires ComfyUI-MMH3Tools. Wire chunk_frames / overlap_frames identically on
-    both nodes (MMH3 Chunk Schedule feeds both), and do not wire the sampler's
-    prior_av_latent — windows are cut from frame 0 of the driving clip.
+    One still covers every chunk — identity-only conditioning; pose always comes
+    from the footage.
     """
 
     @classmethod
@@ -221,29 +363,21 @@ class ViggleAnimateConditioningWindowed:
                               "tooltip": "Target width. 0 = driving clip's own width (the evaluated configuration)."}),
             "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
                                "tooltip": "Target height. 0 = driving clip's own height."}),
-            "chunk_frames": ("INT", {"default": 192, "min": 0, "max": 3600, "step": 17,
-                                     "tooltip": "New content per chunk, frames at 24 fps. 0 = one chunk over the whole clip. MUST equal the looping sampler's chunk_frames."}),
-            "overlap_frames": ("INT", {"default": 22, "min": 0, "max": 3600, "step": 17,
-                                       "tooltip": "Frames each chunk carries from the previous one. MUST equal the looping sampler's overlap_frames."}),
+            "chunk_frames": ("INT", {"default": 124, "min": 39, "max": 3600, "step": 17,
+                                     "tooltip": "Render length per chunk, frames at 24 fps. 124 is the finetune's evaluated operating point — every chunk runs at exactly this length."}),
+            "overlap_frames": ("INT", {"default": 22, "min": 5, "max": 3600, "step": 17,
+                                       "tooltip": "Frames shared by consecutive windows. Both renders of the overlap are blended, so this is also the default crossfade length."}),
         }}
 
-    RETURN_TYPES = ("MMH3_COND_SET", "LATENT")
-    RETURN_NAMES = ("cond_set", "latent")
+    RETURN_TYPES = ("VIGGLE_COND_SET",)
+    RETURN_NAMES = ("cond_set",)
     FUNCTION = "build"
     CATEGORY = "conditioning/viggle"
     DESCRIPTION = ("Viggle-Animate conditioning, windowed: per-chunk driving-video references "
-                   "as an MMH3 cond_set for the MiniMax H3 Looping Sampler (MMH3Tools).")
+                   "for the Viggle Chunked Sampler. Long clips in, one still, no flicker.")
 
     def build(self, cond_video, ref_image, text_cond, vae, width, height,
               chunk_frames, overlap_frames):
-        try:
-            from mmh3tools.nodes_windows import _plan
-            from mmh3tools.common import frame_at_latent
-        except ImportError as e:
-            raise ImportError(
-                "Viggle-Animate windowed conditioning needs ComfyUI-MMH3Tools installed — "
-                "it cuts the driving clip on the looping sampler's own schedule.") from e
-
         # ---- frozen text conditioning -------------------------------------
         prompt_embeds = text_cond["prompt_embeds"]      # [1, 362, 5120] bf16
         text_token_tags = text_cond["text_token_tags"]  # [362] int64
@@ -267,15 +401,9 @@ class ViggleAnimateConditioningWindowed:
             logging.info("[ViggleAnimateConditioningWindowed] %d frames -> %d on the 17j+5 "
                          "grid, %d dropped from the tail", asked_f, total_f, asked_f - total_f)
 
-        # ---- the looping sampler's own schedule (offset 0: no prior) ------
-        cf = int(chunk_frames) if int(chunk_frames) > 0 else total_f
-        _length, _overlap, _pf, _pt, windows = _plan(total_f, cf, int(overlap_frames),
-                                                     "standard_static")
-        spans = [(min(frame_at_latent(w.index_list[0]), total_f - 1),
-                  min(frame_at_latent(w.index_list[-1] + 1) - 1, total_f - 1))
-                 for w in windows]
+        spans = plan_spans(total_f, chunk_frames, overlap_frames)
 
-        # ---- reference 2 first: the still is encoded ONCE for all chunks --
+        # ---- the still is encoded ONCE for all chunks ----------------------
         ih, iw = ref_image.shape[1], ref_image.shape[2]
         scale = short_edge / min(iw, ih)  # upscaling included, no area cap (per the finetune)
         th = max(CANVAS_MULTIPLE, round(ih * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
@@ -287,11 +415,11 @@ class ViggleAnimateConditioningWindowed:
             z_img = vae.encode(img)
             _cache_put(ikey, vae, z_img)
 
-        # ---- one cond entry per chunk, each with its own video window -----
+        # ---- one cond entry per chunk, each with its own footage window ----
         conds, prompts = [], []
         for i, (a, b) in enumerate(spans):
             n = b - a + 1
-            while n % 17 != 5:  # grid-valid by construction except the clamped tail window
+            while n % 17 != 5:  # grid-valid by construction; kept as a safety net
                 n -= 1
             if n < 5:
                 raise ValueError(f"Viggle-Animate: chunk {i}'s window (frames {a}-{b}) is "
@@ -317,21 +445,122 @@ class ViggleAnimateConditioningWindowed:
                      len(conds), total_f, total_f / FPS,
                      ", ".join(f"{a}-{b}" for a, b in spans))
 
-        # ---- the whole clip's latent, written back chunk by chunk ---------
-        latent_t = core_h3.video_latent_t(total_f)
-        audio_t = round(total_f / core_h3.FPS * core_h3.AUDIO_LATENT_FPS)
-        latent = {"samples": comfy.nested_tensor.NestedTensor((
-            torch.zeros([1, 24, latent_t, ch // 16, cw // 16],
+        return ({"conds": conds, "prompts": prompts, "spans": spans,
+                 "total_frames": total_f, "canvas": (ch, cw)},)
+
+
+class ViggleChunkedSampler:
+    """Render a windowed Viggle clip chunk by chunk, crossfaded in pixel space.
+
+    Each chunk is an independent, full-length render — the exact configuration
+    the finetune was evaluated at — so nothing is out-of-distribution and there
+    is no latent carry to drift. Consecutive chunks share driving footage over
+    the overlap; both renders of those frames track the same motion, so the
+    pixel-space crossfade blends texture only: no pop, no flicker.
+
+    Chunks are cached on (footage, still, chunk seed, schedule, sampler, cfg,
+    model): re-queueing with rerender_chunk/rerender_seed set re-renders exactly
+    one chunk and re-blends from cache.
+
+    Takes the same NOISE / GUIDER / SAMPLER / SIGMAS objects as Sampler Custom
+    Advanced — the guider's positive is swapped per chunk from the cond_set.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "noise": ("NOISE", {"tooltip": "From a Noise node (e.g. RandomNoise). Its seed is offset per chunk: chunk i renders with seed + i."}),
+            "guider": ("GUIDER", {"tooltip": "From BasicGuider / CFGGuider. Only its model, cfg and negative matter — the positive is replaced per chunk from the cond_set."}),
+            "sampler": ("SAMPLER", {"tooltip": "From KSamplerSelect or RES4LYF — reused for every chunk."}),
+            "sigmas": ("SIGMAS", {"tooltip": "The step schedule (BasicScheduler etc.) — every chunk runs the identical schedule."}),
+            "cond_set": ("VIGGLE_COND_SET", {"tooltip": "From Viggle-Animate Conditioning (H3, Windowed)."}),
+            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE. Decodes each chunk; the model's (silent) audio half is discarded — keep your driving clip's own audio at save time."}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                             "tooltip": "Base seed. Chunk i renders with seed + i, so the chunks vary independently while staying reproducible."}),
+            "rerender_chunk": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1,
+                                       "tooltip": "1-based chunk number to re-render (0 = off). Only that chunk's cache key changes — everything else serves from cache."}),
+            "rerender_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                                      "tooltip": "Seed for the chunk selected by rerender_chunk. Type a new number for a new take."}),
+            "crossfade_frames": ("INT", {"default": 22, "min": 0, "max": 360, "step": 1,
+                                         "tooltip": "Blend length across each overlap. Both sides tracked the same footage, so this morphs texture, not motion. Clamped to the overlap."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("frames",)
+    FUNCTION = "sample"
+    CATEGORY = "sampling/viggle"
+    DESCRIPTION = ("Chunked Viggle-Animate sampler: independent full-length renders, "
+                   "crossfaded joins, per-chunk cache and re-render.")
+
+    def sample(self, noise, guider, sampler, sigmas, cond_set, vae, seed,
+               rerender_chunk, rerender_seed, crossfade_frames):
+        spans = cond_set["spans"]
+        conds = cond_set["conds"]
+        if len(spans) != len(conds) or not conds:
+            raise ValueError("Viggle Chunked Sampler: cond_set spans/conds mismatch.")
+        total_f = int(cond_set["total_frames"])
+        ch, cw = cond_set["canvas"]
+        model = guider.model_patcher
+
+        pbar = comfy.utils.ProgressBar(len(spans))
+        frames_list = []
+        for i, (a, b) in enumerate(spans):
+            n = b - a + 1
+            seed_i = int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i
+            key = self._chunk_key(conds[i], seed_i, ch, cw, n, sigmas, sampler, guider)
+            fr = _chunk_cache_get(key, model)
+            if fr is None:
+                out = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
+                                         seed_i, ch, cw, n)
+                video = out["samples"]
+                if video.is_nested:
+                    video = video.unbind()[0]  # the model's audio half is silent; drop it
+                images = vae.decode(video)
+                if images.dim() == 5:  # combine batches
+                    images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+                fr = images.clamp(0, 1).mul(255.0).round().to(torch.uint8).cpu()
+                _chunk_cache_put(key, model, fr)
+            frames_list.append(fr)
+            pbar.update(1)
+
+        stitched = _stitch(frames_list, spans, int(crossfade_frames))
+        return (stitched / 255.0,)
+
+    def _render_chunk(self, noise, guider, sampler, sigmas, cond, seed_i, ch, cw, n):
+        lat_t = _frames_to_latents(n)
+        samples = comfy.nested_tensor.NestedTensor((
+            torch.zeros([1, 24, lat_t, ch // 16, cw // 16],
                         device=comfy.model_management.intermediate_device()),
-            torch.zeros([1, 32, 2, audio_t],
+            torch.zeros([1, 32, 2, round(n / FPS * 40)],
                         device=comfy.model_management.intermediate_device()),
-        ))}
-        return ({"conds": conds, "prompts": prompts}, latent)
+        ))
+        samples = comfy.sample.fix_empty_latent_channels(guider.model_patcher, samples)
+        chunk_latent = {"samples": samples}
+        chunk_noise = copy.copy(noise)  # never mutate the cached Noise object
+        chunk_noise.seed = seed_i
+        callback = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        out_samples = _chunk_guider(guider, cond).sample(
+            chunk_noise.generate_noise(chunk_latent), samples, sampler, sigmas,
+            callback=callback, disable_pbar=disable_pbar, seed=seed_i)
+        return {"samples": out_samples.to(comfy.model_management.intermediate_device())}
+
+    def _chunk_key(self, cond, seed_i, ch, cw, n, sigmas, sampler, guider):
+        refs = cond[0][1]["minimax_refs"]
+        h = hashlib.sha1()
+        h.update(refs[0]["latent"].detach().cpu().contiguous().numpy().tobytes())
+        h.update(refs[1]["latent"].detach().cpu().contiguous().numpy().tobytes())
+        h.update(repr((seed_i, ch, cw, n, _sampler_fp(sampler),
+                       float(getattr(guider, "cfg", 0) or 0))).encode())
+        h.update(sigmas.detach().cpu().float().numpy().tobytes())
+        return h.digest()
 
 
 NODE_CLASS_MAPPINGS = {"ViggleTextCondLoader": ViggleTextCondLoader,
                        "ViggleAnimateConditioning": ViggleAnimateConditioning,
-                       "ViggleAnimateConditioningWindowed": ViggleAnimateConditioningWindowed}
+                       "ViggleAnimateConditioningWindowed": ViggleAnimateConditioningWindowed,
+                       "ViggleChunkedSampler": ViggleChunkedSampler}
 NODE_DISPLAY_NAME_MAPPINGS = {"ViggleTextCondLoader": "Load Text Conditioning (Viggle)",
                               "ViggleAnimateConditioning": "Viggle-Animate Conditioning (H3)",
-                              "ViggleAnimateConditioningWindowed": "Viggle-Animate Conditioning (H3, Windowed)"}
+                              "ViggleAnimateConditioningWindowed": "Viggle-Animate Conditioning (H3, Windowed)",
+                              "ViggleChunkedSampler": "Viggle Chunked Sampler"}
