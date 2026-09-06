@@ -369,8 +369,8 @@ class ViggleAnimateConditioningWindowed:
                                        "tooltip": "Frames shared by consecutive windows. Both renders of the overlap are blended, so this is also the default crossfade length."}),
         }}
 
-    RETURN_TYPES = ("VIGGLE_COND_SET",)
-    RETURN_NAMES = ("cond_set",)
+    RETURN_TYPES = ("VIGGLE_COND_SET", "CONDITIONING")
+    RETURN_NAMES = ("cond_set", "guider_positive")
     FUNCTION = "build"
     CATEGORY = "conditioning/viggle"
     DESCRIPTION = ("Viggle-Animate conditioning, windowed: per-chunk driving-video references "
@@ -446,8 +446,10 @@ class ViggleAnimateConditioningWindowed:
                      len(conds), total_f, total_f / FPS,
                      ", ".join(f"{a}-{b}" for a, b in spans))
 
+        # guider_positive exists only so the guider's required `positive` socket
+        # has a source — the sampler overwrites it per chunk from the cond_set.
         return ({"conds": conds, "prompts": prompts, "spans": spans,
-                 "total_frames": total_f, "canvas": (ch, cw)},)
+                 "total_frames": total_f, "canvas": (ch, cw)}, conds[0])
 
 
 class ViggleChunkedSampler:
