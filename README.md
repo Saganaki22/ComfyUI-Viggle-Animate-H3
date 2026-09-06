@@ -26,6 +26,13 @@ hardware.
 Everything else is ComfyUI core: **Load Diffusion Model**, **Load LoRA (Model Only)**,
 **ModelSamplingMiniMaxH3** (shift_video 3.0), **KSampler**, **VAE Decode**, **Save Video**.
 
+| cond_vid | ref_img | output |
+|:---:|:---:|:---:|
+| <video src="https://github.com/user-attachments/assets/2529857c-2667-4641-9d2e-5dcb3c03913d" controls muted></video> | <img src="https://github.com/user-attachments/assets/f6adf969-03d5-4a58-bd30-5ec2d0bc604b" width="300"> | <video src="https://github.com/user-attachments/assets/deedde68-80de-47d2-9e1f-7eaa3bc35457" controls muted></video> |
+
+
+### euler / beta - 6-steps
+
 ## Install
 
 ```bash
