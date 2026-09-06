@@ -1,5 +1,6 @@
 import collections
 import hashlib
+import logging
 import math
 import os
 import weakref
@@ -18,8 +19,11 @@ MIN_ASPECT, MAX_ASPECT = 1 / 4, 4
 
 # Encoded reference latents are deterministic per (content, canvas, frames, VAE);
 # caching them lets repeat runs skip the video-VAE encode (the multi-second stall).
+# Cap is generous on purpose: a windowed run needs chunks+1 entries, and the total
+# bytes self-limit — the windows sum to roughly one full clip's latent, which the
+# workflow itself is already holding.
 _LATENT_CACHE = collections.OrderedDict()
-_CACHE_MAX = 4
+_CACHE_MAX = 64
 
 
 def _fingerprint(t, extra):
@@ -193,7 +197,141 @@ class ViggleAnimateConditioning:
         return (cond, latent)
 
 
+class ViggleAnimateConditioningWindowed:
+    """Windowed Viggle-Animate conditioning for MMH3Tools' Looping Sampler.
+
+    Emits an MMH3_COND_SET: one conditioning entry per chunk, each carrying the
+    driving clip's OWN span as its video reference (cut on the looping sampler's
+    schedule, so chunk i is conditioned on the footage it renders) plus the still,
+    broadcast unchanged to every chunk. The latent output is the whole clip.
+
+    Requires ComfyUI-MMH3Tools. Wire chunk_frames / overlap_frames identically on
+    both nodes (MMH3 Chunk Schedule feeds both), and do not wire the sampler's
+    prior_av_latent — windows are cut from frame 0 of the driving clip.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "cond_video": ("IMAGE", {"tooltip": "The WHOLE driving clip at 24 fps. Its (grid-snapped) length IS the output length — cut the tail off with Load Video's frame_load_cap if you want shorter."}),
+            "ref_image": ("IMAGE", {"tooltip": "Single still of the person. Identity-only conditioning — pose comes from each chunk's own footage, so one still covers every chunk and need not match any frame's pose."}),
+            "text_cond": ("TEXT_COND", {"tooltip": "From the Load Text Conditioning node."}),
+            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE (from the base model)."}),
+            "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
+                              "tooltip": "Target width. 0 = driving clip's own width (the evaluated configuration)."}),
+            "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
+                               "tooltip": "Target height. 0 = driving clip's own height."}),
+            "chunk_frames": ("INT", {"default": 192, "min": 0, "max": 3600, "step": 17,
+                                     "tooltip": "New content per chunk, frames at 24 fps. 0 = one chunk over the whole clip. MUST equal the looping sampler's chunk_frames."}),
+            "overlap_frames": ("INT", {"default": 22, "min": 0, "max": 3600, "step": 17,
+                                       "tooltip": "Frames each chunk carries from the previous one. MUST equal the looping sampler's overlap_frames."}),
+        }}
+
+    RETURN_TYPES = ("MMH3_COND_SET", "LATENT")
+    RETURN_NAMES = ("cond_set", "latent")
+    FUNCTION = "build"
+    CATEGORY = "conditioning/viggle"
+    DESCRIPTION = ("Viggle-Animate conditioning, windowed: per-chunk driving-video references "
+                   "as an MMH3 cond_set for the MiniMax H3 Looping Sampler (MMH3Tools).")
+
+    def build(self, cond_video, ref_image, text_cond, vae, width, height,
+              chunk_frames, overlap_frames):
+        try:
+            from mmh3tools.nodes_windows import _plan
+            from mmh3tools.common import frame_at_latent
+        except ImportError as e:
+            raise ImportError(
+                "Viggle-Animate windowed conditioning needs ComfyUI-MMH3Tools installed — "
+                "it cuts the driving clip on the looping sampler's own schedule.") from e
+
+        # ---- frozen text conditioning -------------------------------------
+        prompt_embeds = text_cond["prompt_embeds"]      # [1, 362, 5120] bf16
+        text_token_tags = text_cond["text_token_tags"]  # [362] int64
+
+        # ---- geometry: same canvas rules as the single-pass node ----------
+        vh, vw = cond_video.shape[1], cond_video.shape[2]
+        tgt_w, tgt_h = (width or vw), (height or vh)
+        short_edge = min(tgt_w, tgt_h)
+        max_pixels = short_edge * max(tgt_w, tgt_h)
+        ch, cw = resolve_canvas(tgt_w, tgt_h, short_edge, max_pixels)
+        rh, rw = resolve_canvas(vw, vh, short_edge, max_pixels)
+
+        # ---- total length = the clip itself, snapped DOWN to 17j+5 --------
+        total_f = cond_video.shape[0]
+        asked_f = total_f
+        while total_f % 17 != 5 and total_f > 5:
+            total_f -= 1
+        if total_f < 5:
+            raise ValueError("Viggle-Animate: driving clip needs at least 5 frames (~0.2 s at 24 fps)")
+        if total_f != asked_f:
+            logging.info("[ViggleAnimateConditioningWindowed] %d frames -> %d on the 17j+5 "
+                         "grid, %d dropped from the tail", asked_f, total_f, asked_f - total_f)
+
+        # ---- the looping sampler's own schedule (offset 0: no prior) ------
+        cf = int(chunk_frames) if int(chunk_frames) > 0 else total_f
+        _length, _overlap, _pf, _pt, windows = _plan(total_f, cf, int(overlap_frames),
+                                                     "standard_static")
+        spans = [(min(frame_at_latent(w.index_list[0]), total_f - 1),
+                  min(frame_at_latent(w.index_list[-1] + 1) - 1, total_f - 1))
+                 for w in windows]
+
+        # ---- reference 2 first: the still is encoded ONCE for all chunks --
+        ih, iw = ref_image.shape[1], ref_image.shape[2]
+        scale = short_edge / min(iw, ih)  # upscaling included, no area cap (per the finetune)
+        th = max(CANVAS_MULTIPLE, round(ih * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        tw = max(CANVAS_MULTIPLE, round(iw * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        ikey = _fingerprint(ref_image[:1], ("i", tw, th, id(vae)))
+        z_img = _cache_get(ikey, vae)
+        if z_img is None:
+            img = ref_image[:1] if (ih, iw) == (th, tw) else core_h3._resize(ref_image[:1], tw, th, "disabled")
+            z_img = vae.encode(img)
+            _cache_put(ikey, vae, z_img)
+
+        # ---- one cond entry per chunk, each with its own video window -----
+        conds, prompts = [], []
+        for i, (a, b) in enumerate(spans):
+            n = b - a + 1
+            while n % 17 != 5:  # grid-valid by construction except the clamped tail window
+                n -= 1
+            if n < 5:
+                raise ValueError(f"Viggle-Animate: chunk {i}'s window (frames {a}-{b}) is "
+                                 "under 5 frames after grid snapping — raise chunk_frames or "
+                                 "lower overlap_frames.")
+            frames = cond_video[a:a + n]
+            vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
+            z_video = _cache_get(vkey, vae)
+            if z_video is None:
+                if (vh, vw) != (rh, rw):
+                    frames = core_h3._resize(frames, rw, rh, "disabled")
+                z_video = vae.encode(frames)
+                _cache_put(vkey, vae, z_video)
+            video_block = {"kind": "video", "latent_t": z_video.shape[2],
+                           "latent_h": rh // 16, "latent_w": rw // 16,
+                           "ref_audio_t": 0, "latent": z_video, "audio_latent": None}
+            image_block = {"kind": "image", "latent_h": th // 16, "latent_w": tw // 16,
+                           "latent": z_img.clone()}
+            conds.append([[prompt_embeds, {"minimax_refs": [video_block, image_block],
+                                           "minimax_token_tags": text_token_tags}]])
+            prompts.append(f"chunk {i}: frames {a}-{a + n - 1}")
+        logging.info("[ViggleAnimateConditioningWindowed] %d chunks over %d frames (%.2fs): %s",
+                     len(conds), total_f, total_f / FPS,
+                     ", ".join(f"{a}-{b}" for a, b in spans))
+
+        # ---- the whole clip's latent, written back chunk by chunk ---------
+        latent_t = core_h3.video_latent_t(total_f)
+        audio_t = round(total_f / core_h3.FPS * core_h3.AUDIO_LATENT_FPS)
+        latent = {"samples": comfy.nested_tensor.NestedTensor((
+            torch.zeros([1, 24, latent_t, ch // 16, cw // 16],
+                        device=comfy.model_management.intermediate_device()),
+            torch.zeros([1, 32, 2, audio_t],
+                        device=comfy.model_management.intermediate_device()),
+        ))}
+        return ({"conds": conds, "prompts": prompts}, latent)
+
+
 NODE_CLASS_MAPPINGS = {"ViggleTextCondLoader": ViggleTextCondLoader,
-                       "ViggleAnimateConditioning": ViggleAnimateConditioning}
+                       "ViggleAnimateConditioning": ViggleAnimateConditioning,
+                       "ViggleAnimateConditioningWindowed": ViggleAnimateConditioningWindowed}
 NODE_DISPLAY_NAME_MAPPINGS = {"ViggleTextCondLoader": "Load Text Conditioning (Viggle)",
-                              "ViggleAnimateConditioning": "Viggle-Animate Conditioning (H3)"}
+                              "ViggleAnimateConditioning": "Viggle-Animate Conditioning (H3)",
+                              "ViggleAnimateConditioningWindowed": "Viggle-Animate Conditioning (H3, Windowed)"}
