@@ -87,18 +87,20 @@ class ViggleAnimateConditioning:
     FUNCTION = "build"
     CATEGORY = "conditioning/viggle"
     DESCRIPTION = ("Viggle-Animate conditioning: frozen text embed + video-first nested references. "
-                   "Pair with MiniMaxH3SigmaShift (shift 3) and 4 sampling steps.")
+                   "Pair with MiniMaxH3SigmaShift (shift 3) and 4-8 sampling steps.")
 
     def build(self, cond_video, ref_image, text_cond, vae, width, height, length):
         # ---- frozen text conditioning -------------------------------------
         prompt_embeds = text_cond["prompt_embeds"]      # [1, 362, 5120] bf16
         text_token_tags = text_cond["text_token_tags"]  # [362] int64
 
-        # ---- geometry: driving clip rules everything -----------------------
+        # ---- geometry: clip dims by default; manual w/h sets the canvas ----
+        # Reference parity (sample.py): short_edge = min(h, w) of the TARGET,
+        # max_pixels = target area; both references lay out on that canvas.
         vh, vw = cond_video.shape[1], cond_video.shape[2]
-        short_edge = min(vh, vw)
-        max_pixels = short_edge * max(vh, vw)
         tgt_w, tgt_h = (width or vw), (height or vh)
+        short_edge = min(tgt_w, tgt_h)
+        max_pixels = short_edge * max(tgt_w, tgt_h)
         ch, cw = resolve_canvas(tgt_w, tgt_h, short_edge, max_pixels)
 
         frame_count, latent_t, audio_t = core_h3.temporal_shape(length)
