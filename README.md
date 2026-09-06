@@ -100,6 +100,8 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 ## Limitations
 
 - **Identity drift on re-entry**: when the subject leaves the camera view and re-enters, the re-entry settles toward the driving video's original appearance rather than the reference image. The same applies when the subject moves far from the reference pose or makes abrupt large motions (e.g. a backflip) — the further from the still, the weaker the identity hold.
+- **Lip-sync limitations**: the generated subject does not reliably lip-sync to the conditioning video.
+- **Reference image compatibility**: if you cannot get the reference-image character to appear correctly in the output video (identity drift), make the reference image match the pose/stance of the person in the conditioning video as closely as possible (same background). Keep the gen between **0.4–0.6 megapixels** and use **LCM or normal sampling with 6–8 steps**.
 
 ## Links
 
