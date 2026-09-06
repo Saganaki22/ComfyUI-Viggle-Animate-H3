@@ -2,6 +2,8 @@
 
 **[English](README.md) | [中文](README_zh.md)**
 
+<img width="731" height="468" alt="Screenshot 2026-09-05 214633" src="https://github.com/user-attachments/assets/1b65c73d-555e-4097-a2de-7ae2f5e6851f" />
+
 **[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** 的 ComfyUI 节点 —— 这是对
 MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调,用于**视频角色替换**:输入一段驱动视频和
 一张参考图,即可将视频中的表演者替换为参考图中的角色。动作、运镜、节奏、背景和光线来自视频;
@@ -20,6 +22,13 @@ MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调,用于**视频角色替�
 
 其余均使用 ComfyUI 核心节点:**Load Diffusion Model**、**Load LoRA (Model Only)**、
 **ModelSamplingMiniMaxH3**(shift_video 3.0)、**KSampler**、**VAE Decode**、**Save Video**。
+
+| 驱动视频 | 参考图 | 输出 |
+|:---:|:---:|:---:|
+| <video src="https://github.com/user-attachments/assets/2529857c-2667-4641-9d2e-5dcb3c03913d" controls muted></video> | <img src="https://github.com/user-attachments/assets/f6adf969-03d5-4a58-bd30-5ec2d0bc604b" width="300"> | <video src="https://github.com/user-attachments/assets/deedde68-80de-47d2-9e1f-7eaa3bc35457" controls muted></video> |
+
+
+### euler / beta - 6 步
 
 ## 安装
 
@@ -45,7 +54,6 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 |---|---|---|
 | [viggle_animate_dmd_lora.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora.safetensors) | 3.5 GB | 原始 rank 128,无损转换 |
 | [viggle_animate_dmd_lora_r64.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r64.safetensors) | 0.88 GB | SVD 截断,保留 99.26% 谱能量 |
-| [viggle_animate_dmd_lora_r29.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r29.safetensors) | 0.40 GB | SVD 截断,保留 98.2% 谱能量 |
 
 **冻结文本条件** → `ComfyUI/models/text_cond/`
 

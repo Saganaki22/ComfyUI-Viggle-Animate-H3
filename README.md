@@ -57,7 +57,6 @@ required; it is a delta on the *finetuned* transformer, not the stock MiniMax on
 |---|---|---|
 | [viggle_animate_dmd_lora.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora.safetensors) | 3.5 GB | Original rank 128, exact conversion |
 | [viggle_animate_dmd_lora_r64.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r64.safetensors) | 0.88 GB | SVD-truncated, 99.26% spectral energy |
-| [viggle_animate_dmd_lora_r29.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r29.safetensors) | 0.40 GB | SVD-truncated, 98.2% spectral energy |
 
 **Frozen text conditioning** → `ComfyUI/models/text_cond/`
 
