@@ -1,5 +1,8 @@
+import collections
+import hashlib
 import math
 import os
+import weakref
 
 import torch
 
@@ -12,6 +15,46 @@ from comfy_extras import nodes_minimax_h3 as core_h3
 CANVAS_MULTIPLE = 32
 FPS = 24
 MIN_ASPECT, MAX_ASPECT = 1 / 4, 4
+
+# Encoded reference latents are deterministic per (content, canvas, frames, VAE);
+# caching them lets repeat runs skip the video-VAE encode (the multi-second stall).
+_LATENT_CACHE = collections.OrderedDict()
+_CACHE_MAX = 4
+
+
+def _fingerprint(t, extra):
+    """Content key: shape + dtype + strided pixel sample + global checksum.
+
+    The full-tensor sum makes any content change a cache miss; the strided
+    byte sample pins down which arrangement produced it. ~0.3 s at 1.4 GB,
+    versus the multi-second VAE encode it gates.
+    """
+    h = hashlib.sha1(repr((tuple(t.shape), str(t.dtype), extra)).encode())
+    h.update(t.sum(dtype=torch.float64).item().hex().encode())
+    fs = max(1, t.shape[0] // 8)   # <= 9 frames
+    hs = max(1, t.shape[1] // 24)  # ~24x24 px per sampled frame
+    ws = max(1, t.shape[2] // 24)
+    s = t[::fs, ::hs, ::ws, :]
+    h.update(s.detach().cpu().contiguous().numpy().tobytes())
+    return h.digest()
+
+
+def _cache_get(key, vae):
+    ent = _LATENT_CACHE.get(key)
+    if ent is None:
+        return None
+    ref, val = ent
+    if ref() is not vae:           # stale id from a freed VAE
+        return None
+    _LATENT_CACHE.move_to_end(key)
+    return val.clone()
+
+
+def _cache_put(key, vae, val):
+    _LATENT_CACHE[key] = (weakref.ref(vae), val.clone())
+    _LATENT_CACHE.move_to_end(key)
+    while len(_LATENT_CACHE) > _CACHE_MAX:
+        _LATENT_CACHE.popitem(last=False)
 
 
 def resolve_canvas(aspect_w, aspect_h, short_edge, max_pixels):
@@ -107,16 +150,19 @@ class ViggleAnimateConditioning:
 
         # ---- reference 1: the driving video (first in the presentation) ----
         rh, rw = resolve_canvas(vw, vh, short_edge, max_pixels)
-        frames = cond_video
-        if (vh, vw) != (rh, rw):
-            frames = core_h3._resize(frames, rw, rh, "disabled")
-        n = min(frames.shape[0], frame_count)
+        n = min(cond_video.shape[0], frame_count)
         if n < 5:
             raise ValueError("Viggle-Animate: driving clip needs at least 5 frames (~0.2 s at 24 fps)")
         while n % 17 != 5:
             n -= 1
-        frames = frames[:n]
-        z_video = vae.encode(frames)
+        frames = cond_video[:n]  # truncate before resampling: dropped frames never see lanczos
+        vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
+        z_video = _cache_get(vkey, vae)
+        if z_video is None:
+            if (vh, vw) != (rh, rw):
+                frames = core_h3._resize(frames, rw, rh, "disabled")
+            z_video = vae.encode(frames)
+            _cache_put(vkey, vae, z_video)
         video_block = {"kind": "video", "latent_t": z_video.shape[2],
                        "latent_h": rh // 16, "latent_w": rw // 16,
                        "ref_audio_t": 0, "latent": z_video, "audio_latent": None}
@@ -126,8 +172,12 @@ class ViggleAnimateConditioning:
         scale = short_edge / min(iw, ih)  # upscaling included, no area cap (per the finetune)
         th = max(CANVAS_MULTIPLE, round(ih * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
         tw = max(CANVAS_MULTIPLE, round(iw * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        img = ref_image[:1] if (ih, iw) == (th, tw) else core_h3._resize(ref_image[:1], tw, th, "disabled")
-        z_img = vae.encode(img)
+        ikey = _fingerprint(ref_image[:1], ("i", tw, th, id(vae)))
+        z_img = _cache_get(ikey, vae)
+        if z_img is None:
+            img = ref_image[:1] if (ih, iw) == (th, tw) else core_h3._resize(ref_image[:1], tw, th, "disabled")
+            z_img = vae.encode(img)
+            _cache_put(ikey, vae, z_img)
         image_block = {"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z_img}
 
         # ---- assemble: video first, then picture (the frozen order) --------
