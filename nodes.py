@@ -214,19 +214,20 @@ def _frames_to_latents(fc):
 
 
 def plan_spans(total_f, chunk_f, overlap_f):
-    """Static window schedule in frames.
+    """Static window schedule: frames + latent placement.
 
     Full 17j+5 windows laid at a stride that keeps every start on latent phase
     0; the LAST window starts flush at total-chunk, so every render runs at the
     trained chunk length and the slack becomes extra overlap with the window
-    before it. Returns [(first_frame, last_frame), ...] covering 0..total_f-1.
+    before it. Returns [(first_frame, last_frame, lat_start, lat_count), ...]
+    covering 0..total_f-1.
     """
     L = _frames_to_latents(int(chunk_f))
     total_lat = _frames_to_latents(int(total_f))
     if L < 7:
         raise ValueError("Viggle-Animate: chunk_frames must be at least 22 frames (124 recommended).")
     if L >= total_lat:
-        return [(0, int(total_f) - 1)]
+        return [(0, int(total_f) - 1, 0, total_lat)]
     O = _frames_to_latents(max(5, int(overlap_f)))
     O = max(2, min(O, L - 5))          # stride stays a multiple of 5 (phase 0)
     stride = L - O
@@ -234,51 +235,13 @@ def plan_spans(total_f, chunk_f, overlap_f):
     last = total_lat - L
     if starts[-1] != last:
         starts.append(last)
-    return [(_frame_at_latent(s), _frame_at_latent(s + L) - 1) for s in starts]
+    return [(_frame_at_latent(s), _frame_at_latent(s + L) - 1, s, L) for s in starts]
 
 
-def _stitch(frames_list, spans, crossfade):
-    """Blend chunk renders across their footage overlaps into one clip.
-
-    Both renders of an overlap frame tracked the same driving footage, so the
-    blend morphs texture, not motion. Ramp weights are complementary, so every
-    blended frame is an exact convex combination of the two renders.
-    """
-    if len(frames_list) == 1:
-        return frames_list[0].float()
-    if not int(crossfade):  # hard cut: each chunk owns its frames up to the next start
-        parts = [frames_list[i][:spans[i + 1][0] - spans[i][0]]
-                 for i in range(len(frames_list) - 1)]
-        parts.append(frames_list[-1])
-        return torch.cat(parts)
-    total_f = spans[-1][1] + 1
-    out = torch.zeros(total_f, *frames_list[0].shape[1:], dtype=torch.float32)
-    wsum = torch.zeros(total_f, 1, 1, 1, dtype=torch.float32)
-    for i, (fr, (a, b)) in enumerate(zip(frames_list, spans)):
-        w = torch.ones(fr.shape[0], dtype=torch.float32)
-        if i > 0:  # fade in over this window's first frames
-            c = min(int(crossfade), fr.shape[0], spans[i - 1][1] - a + 1)
-            if c > 0:
-                w[:c] = torch.linspace(0.0, 1.0, c + 2)[1:-1]
-        if i < len(frames_list) - 1:  # ownership ends where the NEXT window begins:
-            # zero past the blend window first, then ramp down across it — the
-            # ramps of both chunks occupy the same global frames even when the
-            # overlap is wider than the crossfade, so their weights sum to 1
-            a_next = spans[i + 1][0]
-            local = a_next - a
-            w[local:] = 0.0
-            c = min(int(crossfade), b - a_next + 1, fr.shape[0] - local)
-            if c > 0:
-                w[local:local + c] = torch.linspace(1.0, 0.0, c + 2)[1:-1]
-        w = w.view(-1, 1, 1, 1)
-        out[a:b + 1] += fr.float() * w
-        wsum[a:b + 1] += w
-    return out / wsum
-
-
-# Rendered-chunk cache: chunk frames are a pure function of (footage window,
-# still, chunk seed, schedule, sampler, cfg, model). Re-queueing with only
-# rerender_chunk/rerender_seed changed re-renders exactly that one chunk.
+# Rendered-chunk cache. With carry, chunks are CHAINED: chunk i+1 pins the
+# previous chunk's tail, so its output depends on everything before it. Cache
+# keys therefore chain: key_i = H(key_{i-1}, footage_i, seed_i, settings).
+# Re-rendering chunk k invalidates k..end automatically; 1..k-1 stay cached.
 _CHUNK_CACHE = collections.OrderedDict()
 _CHUNK_CACHE_MAX_BYTES = 2 * 1024 ** 3
 
@@ -301,16 +264,16 @@ def _chunk_cache_get(key, model):
     if ref() is not model:         # model/LoRA/patch changed -> stale id
         return None
     _CHUNK_CACHE.move_to_end(key)
-    return val.clone()
+    return (val[0].clone(), val[1].clone())
 
 
-def _chunk_cache_put(key, model, frames_u8):
-    _CHUNK_CACHE[key] = (weakref.ref(model), frames_u8.clone())
+def _chunk_cache_put(key, model, v_half, a_half):
+    _CHUNK_CACHE[key] = (weakref.ref(model), (v_half.clone(), a_half.clone()))
     _CHUNK_CACHE.move_to_end(key)
-    total = sum(v[1].numel() for v in _CHUNK_CACHE.values())
+    total = sum(v[1][0].numel() + v[1][1].numel() for v in _CHUNK_CACHE.values())
     while total > _CHUNK_CACHE_MAX_BYTES and len(_CHUNK_CACHE) > 1:
         _, (_, old) = _CHUNK_CACHE.popitem(last=False)
-        total -= old.numel()
+        total -= old[0].numel() + old[1].numel()
 
 
 def _raw_conds(guider):
@@ -417,7 +380,7 @@ class ViggleAnimateConditioningWindowed:
 
         # ---- one cond entry per chunk, each with its own footage window ----
         conds, prompts = [], []
-        for i, (a, b) in enumerate(spans):
+        for i, (a, b, _lat0, _latn) in enumerate(spans):
             n = b - a + 1
             while n % 17 != 5:  # grid-valid by construction; kept as a safety net
                 n -= 1
@@ -444,7 +407,7 @@ class ViggleAnimateConditioningWindowed:
         logging.info("[ViggleAnimateConditioningWindowed] %d chunks over %d frames (%.2fs), "
                      "rerender_chunk is 1-based: %s",
                      len(conds), total_f, total_f / FPS,
-                     ", ".join(f"{a}-{b}" for a, b in spans))
+                     ", ".join(f"{a}-{b}" for a, b, _, _ in spans))
 
         # guider_positive exists only so the guider's required `positive` socket
         # has a source — the sampler overwrites it per chunk from the cond_set.
@@ -453,17 +416,17 @@ class ViggleAnimateConditioningWindowed:
 
 
 class ViggleChunkedSampler:
-    """Render a windowed Viggle clip chunk by chunk, crossfaded in pixel space.
+    """Render a windowed Viggle clip chunk by chunk with LATENT CARRY.
 
-    Each chunk is an independent, full-length render — the exact configuration
-    the finetune was evaluated at — so nothing is out-of-distribution and there
-    is no latent carry to drift. Consecutive chunks share driving footage over
-    the overlap; both renders of those frames track the same motion, so the
-    pixel-space crossfade blends texture only: no pop, no flicker.
+    Chunk i's tail latents are written into a master latent and chunk i+1
+    samples with a denoise_mask that PINS the overlap to that content (the
+    model sees the carried rows as context at its cond timestep — core #15375).
+    The seam is content-continuous by construction: no pixel blending, no
+    ghosting. The master decodes once at the end.
 
-    Chunks are cached on (footage, still, chunk seed, schedule, sampler, cfg,
-    model): re-queueing with rerender_chunk/rerender_seed set re-renders exactly
-    one chunk and re-blends from cache.
+    Chunks are chained: chunk i+1 carries from chunk i, so cache keys chain
+    too. Re-rendering chunk k (rerender_chunk + rerender_seed) re-renders
+    k..end; chunks before k serve from cache.
 
     Takes the same NOISE / GUIDER / SAMPLER / SIGMAS objects as Sampler Custom
     Advanced — the guider's positive is swapped per chunk from the cond_set.
@@ -477,87 +440,112 @@ class ViggleChunkedSampler:
             "sampler": ("SAMPLER", {"tooltip": "From KSamplerSelect or RES4LYF — reused for every chunk."}),
             "sigmas": ("SIGMAS", {"tooltip": "The step schedule (BasicScheduler etc.) — every chunk runs the identical schedule."}),
             "cond_set": ("VIGGLE_COND_SET", {"tooltip": "From Viggle-Animate Conditioning (H3, Windowed)."}),
-            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE. Decodes each chunk; the model's (silent) audio half is discarded — keep your driving clip's own audio at save time."}),
+            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE. Decodes the finished master latent once; the model's (silent) audio half is discarded — keep your driving clip's own audio at save time."}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                              "tooltip": "Base seed. Chunk i renders with seed + i, so the chunks vary independently while staying reproducible."}),
             "rerender_chunk": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1,
-                                       "tooltip": "1-based chunk number to re-render (0 = off). Only that chunk's cache key changes — everything else serves from cache."}),
+                                       "tooltip": "1-based chunk number to re-render (0 = off). Chunks BEFORE it come from cache; it and every later chunk re-render (they carry from it)."}),
             "rerender_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                                       "tooltip": "Seed for the chunk selected by rerender_chunk. Type a new number for a new take."}),
-            "crossfade_frames": ("INT", {"default": 22, "min": 0, "max": 360, "step": 1,
-                                         "tooltip": "Blend length across each overlap. Both sides tracked the same footage, so this morphs texture, not motion. Clamped to the overlap."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("frames", "chunk_map")
     FUNCTION = "sample"
     CATEGORY = "sampling/viggle"
-    DESCRIPTION = ("Chunked Viggle-Animate sampler: independent full-length renders, "
-                   "crossfaded joins, per-chunk cache and re-render.")
+    DESCRIPTION = ("Chunked Viggle-Animate sampler: latent-carry chunking, seamless joins, "
+                   "per-chunk cache and re-render.")
 
     def sample(self, noise, guider, sampler, sigmas, cond_set, vae, seed,
-               rerender_chunk, rerender_seed, crossfade_frames):
-        spans = cond_set["spans"]
+               rerender_chunk, rerender_seed):
+        windows = cond_set["spans"]      # (a, b, lat0, latn)
         conds = cond_set["conds"]
-        if len(spans) != len(conds) or not conds:
+        if len(windows) != len(conds) or not conds:
             raise ValueError("Viggle Chunked Sampler: cond_set spans/conds mismatch.")
         total_f = int(cond_set["total_frames"])
         ch, cw = cond_set["canvas"]
+        total_lat = _frames_to_latents(total_f)
+        total_a = round(total_f / FPS * 40)
         model = guider.model_patcher
+        dev = comfy.model_management.intermediate_device()
 
-        pbar = comfy.utils.ProgressBar(len(spans))
-        frames_list = []
+        master_v = torch.zeros([1, 24, total_lat, ch // 16, cw // 16], device=dev)
+        master_a = torch.zeros([1, 32, 2, total_a], device=dev)
+
+        pbar = comfy.utils.ProgressBar(len(windows))
         chunk_map = ["%d chunks, %d frames (%.1fs) at %dx%d — rerender_chunk is 1-based:"
-                     % (len(spans), total_f, total_f / FPS, ch, cw)]
-        for i, (a, b) in enumerate(spans):
-            n = b - a + 1
+                     % (len(windows), total_f, total_f / FPS, ch, cw)]
+        prev_key = b""
+        prev_end = None
+        for i, (a, b, lat0, latn) in enumerate(windows):
             seed_i = int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i
-            chunk_map.append("#%d: frames %d-%d (%.1f-%.1fs) seed %d"
-                             % (i + 1, a, b, a / FPS, (b + 1) / FPS, seed_i))
-            key = self._chunk_key(conds[i], seed_i, ch, cw, n, sigmas, sampler, guider)
-            fr = _chunk_cache_get(key, model)
-            if fr is None:
-                out = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
-                                         seed_i, ch, cw, n)
-                video = out["samples"]
-                if video.is_nested:
-                    video = video.unbind()[0]  # the model's audio half is silent; drop it
-                images = vae.decode(video)
-                if images.dim() == 5:  # combine batches
-                    images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
-                fr = images.clamp(0, 1).mul(255.0).round().to(torch.uint8).cpu()
-                _chunk_cache_put(key, model, fr)
-            frames_list.append(fr)
+            carry = 0 if prev_end is None else max(0, prev_end - lat0)
+            chunk_map.append("#%d: frames %d-%d (%.1f-%.1fs) seed %d carry %d lat"
+                             % (i + 1, a, b, a / FPS, (b + 1) / FPS, seed_i, carry))
+            key = self._chunk_key(prev_key, conds[i], seed_i, ch, cw, latn,
+                                  sigmas, sampler, guider)
+            cached = _chunk_cache_get(key, model)
+            if cached is None:
+                out_v, out_a = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
+                                                  seed_i, ch, cw, a, b, lat0, latn,
+                                                  carry, master_v, master_a)
+                _chunk_cache_put(key, model, out_v, out_a)
+            else:
+                out_v, out_a = cached
+                lat0_i = lat0
+                master_v[:, :, lat0_i:lat0_i + latn] = out_v.to(dev)
+                a0 = min(round(a / FPS * 40), total_a)
+                a1 = min(round((b + 1) / FPS * 40), total_a)
+                master_a[:, :, :, a0:a1] = out_a.to(dev)
+            prev_key, prev_end = key, lat0 + latn
             pbar.update(1)
 
-        stitched = _stitch(frames_list, spans, int(crossfade_frames))
-        return (stitched / 255.0, "\n".join(chunk_map))
+        frames = vae.decode(master_v)
+        if frames.dim() == 5:  # combine batches
+            frames = frames.reshape(-1, frames.shape[-3], frames.shape[-2], frames.shape[-1])
+        return (frames, "\n".join(chunk_map))
 
-    def _render_chunk(self, noise, guider, sampler, sigmas, cond, seed_i, ch, cw, n):
-        lat_t = _frames_to_latents(n)
-        samples = comfy.nested_tensor.NestedTensor((
-            torch.zeros([1, 24, lat_t, ch // 16, cw // 16],
-                        device=comfy.model_management.intermediate_device()),
-            torch.zeros([1, 32, 2, round(n / FPS * 40)],
-                        device=comfy.model_management.intermediate_device()),
-        ))
+    def _render_chunk(self, noise, guider, sampler, sigmas, cond, seed_i,
+                      ch, cw, a, b, lat0, latn, carry, master_v, master_a):
+        total_a = master_a.shape[-1]
+        a0 = min(round(a / FPS * 40), total_a)
+        a1 = min(round((b + 1) / FPS * 40), total_a)
+        v = master_v[:, :, lat0:lat0 + latn].clone()
+        au = master_a[:, :, :, a0:a1].clone()
+        samples = comfy.nested_tensor.NestedTensor((v, au))
         samples = comfy.sample.fix_empty_latent_channels(guider.model_patcher, samples)
         chunk_latent = {"samples": samples}
+
+        denoise_mask = None
+        if carry > 0:  # pin the overlap to the previous chunk's output
+            mask_v = torch.ones([1, 1, latn, ch // 16, cw // 16], device=v.device)
+            mask_a = torch.ones([1, 1, 1, a1 - a0], device=au.device)
+            mask_v[:, :, :carry] = 0.0
+            denoise_mask = comfy.nested_tensor.NestedTensor((mask_v, mask_a))
+
         chunk_noise = copy.copy(noise)  # never mutate the cached Noise object
         chunk_noise.seed = seed_i
         callback = latent_preview.prepare_callback(guider.model_patcher, sigmas.shape[-1] - 1)
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-        out_samples = _chunk_guider(guider, cond).sample(
+        out = _chunk_guider(guider, cond).sample(
             chunk_noise.generate_noise(chunk_latent), samples, sampler, sigmas,
-            callback=callback, disable_pbar=disable_pbar, seed=seed_i)
-        return {"samples": out_samples.to(comfy.model_management.intermediate_device())}
+            denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar,
+            seed=seed_i)
+        if out.is_nested:
+            out_v, out_a = out.unbind()
+        else:
+            out_v, out_a = out, None
+        master_v[:, :, lat0:lat0 + latn] = out_v
+        master_a[:, :, :, a0:a1] = out_a
+        return out_v.half().cpu(), out_a.half().cpu()
 
-    def _chunk_key(self, cond, seed_i, ch, cw, n, sigmas, sampler, guider):
+    def _chunk_key(self, prev_key, cond, seed_i, ch, cw, latn, sigmas, sampler, guider):
         refs = cond[0][1]["minimax_refs"]
         h = hashlib.sha1()
+        h.update(prev_key)
         h.update(refs[0]["latent"].detach().cpu().contiguous().numpy().tobytes())
         h.update(refs[1]["latent"].detach().cpu().contiguous().numpy().tobytes())
-        h.update(repr((seed_i, ch, cw, n, _sampler_fp(sampler),
+        h.update(repr((seed_i, ch, cw, latn, _sampler_fp(sampler),
                        float(getattr(guider, "cfg", 0) or 0))).encode())
         h.update(sigmas.detach().cpu().float().numpy().tobytes())
         return h.digest()
