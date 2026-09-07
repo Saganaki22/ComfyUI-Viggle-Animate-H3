@@ -24,6 +24,18 @@ Loop:  Start ──state──▶ Sample Chunk ──video_latent──▶ VAE D
                                                                         Loop End ──chunks──▶ Assemble ──▶ final VAE Decode ──▶ save
 ```
 
+**Which one should I use?**
+
+- **Single-pass** when the run is short enough to lose: a 2–4 chunk clip, you just
+  want the video out the end, and you prefer the smaller graph (2 nodes, one
+  decode, no disk writes, nothing to clean up). Chunk reuse still works, but only
+  in memory — restart ComfyUI and it's gone.
+- **Loop** when the run is long or expensive (many chunks, hours of sampling), you
+  want each chunk decoded/saved while it renders, you need crash-resume, you want
+  to keep several takes of a chunk on disk, or you want your own encoder settings
+  (Video Combine format/audio) applied per chunk. Costs a 4-node graph and a
+  checkpoint folder per run.
+
 ---
 
 ## Viggle-Animate Conditioning (H3, Windowed)
