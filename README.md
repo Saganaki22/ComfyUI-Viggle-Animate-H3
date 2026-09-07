@@ -177,12 +177,12 @@ Four nodes turn the same windowed conditioning into a **graph-expanded loop** wi
 | **Viggle Assemble Chunk Latents** | Stitches the saved chunks (trimming overlap) into one LATENT for a single final decode. `chunk_number > 0` loads one chunk for inspection; interrupted runs assemble partially. |
 
 ```text
-Loop Start ─ loop ─────────────────────────┐
-     └ state → Sample Chunk → LATENT → VAE Decode → SaveWEBM ─┐
-                └──────────────────────────────────────────── Loop End
+Loop Start ─ loop ───────────────────────────────┐
+     └ state → Sample Chunk → LATENT → VAE Decode ─┬→ Loop End (images)
+                                                   └→ Video Combine → filenames ↗ (after_save)
 ```
 
-- **The decode/save branch must feed Loop End** — connect the saving node's output (e.g. SaveWEBM's `images`, or VHS Video Combine's filenames into the optional `after_save`) so a chunk cannot start before the previous one is decoded and saved.
+- **The decode/save branch must feed Loop End** — connect VAE Decode's images to `images` and Video Combine's `filenames` output to `after_save`, so a chunk cannot start before the previous one is decoded and saved. (Core SaveWEBM also works: its `images` output goes straight into `images`.)
 - Checkpoints land in `output/viggle_chunks/<run_name>/` as safetensors plus a `manifest.json`; writes are atomic, so a crash never leaves a half-valid chunk.
 - With `resume` on, re-running the queue restores every chunk whose **graph, models, conditioning, sigmas and per-chunk seed** still match (the checkpoint filename embeds that fingerprint). Changed settings sample new files under new names; old takes stay on disk. `rerender_chunk` / `rerender_seed` work as in the single-pass sampler.
 - Decoding each chunk separately means each preview contains overlap context; run the collection through **Viggle Assemble Chunk Latents** → one final VAE Decode for the finished video.

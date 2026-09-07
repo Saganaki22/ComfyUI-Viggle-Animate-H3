@@ -157,12 +157,12 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 | **Viggle Assemble Chunk Latents** | 把保存的分块拼接（去除重叠）为一个 LATENT，做一次最终解码。`chunk_number > 0` 时只加载某一块用于检查；中断的运行可部分拼接。 |
 
 ```text
-Loop Start ─ loop ─────────────────────────┐
-     └ state → Sample Chunk → LATENT → VAE Decode → SaveWEBM ─┐
-                └──────────────────────────────────────────── Loop End
+Loop Start ─ loop ───────────────────────────────┐
+     └ state → Sample Chunk → LATENT → VAE Decode ─┬→ Loop End (images)
+                                                   └→ Video Combine → filenames ↗ (after_save)
 ```
 
-- **解码/保存分支必须接回 Loop End** —— 把保存节点的输出（如 SaveWEBM 的 `images`，或 VHS Video Combine 的 filenames 接到可选的 `after_save`）连到 Loop End，确保上一块完成解码保存后才开始下一块。
+- **解码/保存分支必须接回 Loop End** —— 把 VAE Decode 的 images 接到 `images`，Video Combine 的 `filenames` 输出接到 `after_save`，确保上一块完成解码保存后才开始下一块。（核心 SaveWEBM 也可以：其 `images` 输出直接接 `images`。）
 - 检查点以 safetensors 加 `manifest.json` 的形式存放在 `output/viggle_chunks/<run_name>/`；写入是原子操作，崩溃不会留下半有效的块。
 - 打开 `resume` 后重新排队，会恢复所有**图、模型、条件、sigma 和分块种子**仍匹配的块（检查点文件名内嵌该指纹）。设置改变会以新文件名重新采样；旧结果保留在磁盘上。`rerender_chunk` / `rerender_seed` 与单遍采样器一致。
 - 逐块解码的预览包含重叠上下文；最终成片请走 **Viggle Assemble Chunk Latents** → 一次 VAE Decode。
