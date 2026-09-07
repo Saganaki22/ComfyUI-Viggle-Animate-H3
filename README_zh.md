@@ -147,7 +147,7 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 
 ### 分块循环节点（实验性）
 
-每个节点的完整说明（接口、输出槽顺序、恢复规则、典型流程）：[docs/experimental_nodes.md](docs/experimental_nodes.md)。
+每个节点的完整说明（接口、输出槽顺序、恢复规则、典型流程）：[docs/experimental_nodes.md](docs/experimental_nodes.md)。实测示例工作流：[example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json)。
 
 四个节点把同样的分窗口条件变成**图展开循环**，并配合磁盘检查点：每生成一块，就通过你自己的节点解码并保存 —— 采样器不再需要 VAE 输入；中途失败时，已完成的块全部保留：
 

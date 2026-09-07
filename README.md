@@ -167,7 +167,7 @@ Keep the same override to retain that take, or change `rerender_seed` for anothe
 
 ### Chunk loop nodes (experimental)
 
-Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/experimental_nodes.md](docs/experimental_nodes.md).
+Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/experimental_nodes.md](docs/experimental_nodes.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json).
 
 Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — no VAE input on the sampler, and a failure mid-run keeps every completed chunk:
 
