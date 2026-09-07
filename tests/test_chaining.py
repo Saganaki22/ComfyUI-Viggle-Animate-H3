@@ -231,6 +231,74 @@ class ChainingTests(unittest.TestCase):
                                  {}, DecodeVAE(), 0, 0, 0)
         self.assertFalse(viggle._CHUNK_CACHE)
 
+    def test_windowed_encode_reuses_only_complete_temporal_blocks(self):
+        # Use the real VAE wrapper, temporal padding, normalization and slicing.
+        # Replace the heavy spatial network with a deterministic, clip-dependent
+        # encoder, recording the exact inputs that the real network would see.
+        class WrappedVAE(comfy.sd.VAE):
+            pass
+
+        def make_vae(wrapper):
+            vae = wrapper.__new__(wrapper)
+            network = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE.__new__(comfy.ldm.minimax.vae.MiniMaxH3VideoVAE)
+            torch.nn.Module.__init__(network)
+            network.clip_length, network.token_drop = 17, 3
+            network.pixel_mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1, 1)
+            network.pixel_std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1, 1)
+            network.latents_mean = torch.linspace(-1, 1, 24)
+            network.latents_std = torch.linspace(0.5, 1.5, 24)
+            seen = []
+            def encode_spatial(x):
+                seen.append(x.clone())
+                z = torch.nn.functional.adaptive_avg_pool3d(x.mean(dim=1, keepdim=True),
+                                                            (5, x.shape[-2] // 16, x.shape[-1] // 16))
+                return (z + x.mean()).repeat(1, 48, 1, 1, 1)
+            network._adaptive_encode = encode_spatial
+            vae.first_stage_model = network
+            vae.crop_input, vae.output_channels = False, 3
+            vae.latent_dim, vae.not_video = 3, False
+            vae.device = vae.output_device = torch.device("cpu")
+            vae.vae_dtype = torch.float16
+            vae.disable_offload = False
+            vae.format_encoded = None
+            vae.memory_used_encode = lambda *args: 1
+            vae.process_input = lambda pixels: pixels * 2 - 1
+            vae.patcher = self.model
+            return vae, seen
+
+        text = {"prompt_embeds": conditioning()[0][0], "text_token_tags": torch.zeros(3, dtype=torch.int64)}
+        generator = torch.Generator().manual_seed(123)
+        video = torch.rand(345, 32, 32, 3, generator=generator)
+        still = torch.rand(1, 32, 32, 3, generator=generator)
+        node = viggle.ViggleAnimateConditioningWindowed()
+        cases = [(5, 124, 22, 0), (39, 124, 22, 0), (124, 124, 22, 0),
+                 (345, 124, 22, 0), (345, 124, 5, 0), (345, 124, 39, 0),
+                 (260, 56, 39, 0), (345, 124, 22, 64)]
+        with patch.object(comfy.model_management, "load_models_gpu"):
+            for total, chunk, overlap, size in cases:
+                with self.subTest(total=total, chunk=chunk, overlap=overlap, size=size):
+                    viggle._LATENT_CACHE.clear()
+                    old_vae, old_calls = make_vae(WrappedVAE)
+                    new_vae, new_calls = make_vae(comfy.sd.VAE)
+                    args = (video[:total], still, text)
+                    old = node.build(*args, old_vae, size, size, chunk, overlap)[0]
+                    new = node.build(*args, new_vae, size, size, chunk, overlap)[0]
+                    self.assertEqual(old["spans"], new["spans"])
+                    for left, right in zip(old["conds"], new["conds"]):
+                        for a, b in zip(left[0][1]["minimax_refs"], right[0][1]["minimax_refs"]):
+                            self.assertTrue(torch.equal(a["latent"], b["latent"]))
+                    self.assertLessEqual(len(new_calls), len(old_calls))
+                    for encoded in new_calls:
+                        self.assertTrue(any(torch.equal(encoded, original) for original in old_calls))
+                    if (total, chunk, overlap, size) == (345, 124, 22, 0):
+                        self.assertEqual((len(old_calls) - 1, len(new_calls) - 1), (32, 24))
+                    before = len(new_calls)
+                    warm = node.build(*args, new_vae, size, size, chunk, overlap)[0]
+                    self.assertEqual(before, len(new_calls))
+                    for cold_cond, warm_cond in zip(new["conds"], warm["conds"]):
+                        self.assertTrue(torch.equal(cold_cond[0][1]["minimax_refs"][0]["latent"],
+                                                    warm_cond[0][1]["minimax_refs"][0]["latent"]))
+
     def test_euler_duplicate_zero_corrupts_output_after_finite_preview(self):
         previews = []
         def model(x, sigma, **kwargs):

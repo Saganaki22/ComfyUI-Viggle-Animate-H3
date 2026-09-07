@@ -8,10 +8,12 @@ import weakref
 import torch
 
 import folder_paths
+import comfy.ldm.minimax.vae
 import comfy.model_management
 import comfy.nested_tensor
 import comfy.sample
 import comfy.samplers
+import comfy.sd
 import comfy.utils
 import latent_preview
 from comfy_extras import nodes_minimax_h3 as core_h3
@@ -315,6 +317,14 @@ def _chunk_guider(guider, positive):
     return new_g
 
 
+def _validate_sigmas(sigmas):
+    if not torch.isfinite(sigmas).all() or (sigmas[:-1] <= 0).any() or (sigmas < 0).any():
+        raise ValueError("Viggle Chunked Sampler: sigmas must be finite and positive except for "
+                         "the final zero. A zero before the final point causes division by zero. "
+                         "For the upstream schedule use ManualSigmas: 1.0, 0.8571428571428571, "
+                         "0.6, 0.0. In KJNodes CustomSigmas set interpolate_to_steps to 3, not 4.")
+
+
 class ViggleAnimateConditioningWindowed:
     """Windowed Viggle-Animate conditioning for long driving clips.
 
@@ -389,8 +399,13 @@ class ViggleAnimateConditioningWindowed:
             _cache_put(ikey, vae, z_img)
 
         # ---- one cond entry per chunk, each with its own footage window ----
+        reuse_overlap = (type(vae) is comfy.sd.VAE
+                         and type(vae.first_stage_model) is comfy.ldm.minimax.vae.MiniMaxH3VideoVAE
+                         and vae.first_stage_model.clip_length == 17
+                         and vae.first_stage_model.token_drop == 3)
         conds, prompts = [], []
-        for i, (a, b, _lat0, _latn) in enumerate(spans):
+        reused_blocks = 0
+        for i, (a, b, _lat0, latn) in enumerate(spans):
             n = b - a + 1
             while n % 17 != 5:  # grid-valid by construction; kept as a safety net
                 n -= 1
@@ -402,9 +417,22 @@ class ViggleAnimateConditioningWindowed:
             vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
             z_video = _cache_get(vkey, vae)
             if z_video is None:
+                prefix = None
+                if reuse_overlap and i > 0:
+                    previous = conds[-1][0][1]["minimax_refs"][0]["latent"]
+                    offset = (a - spans[i - 1][0]) // 17 * 5
+                    # Only complete 17-frame / 5-latent blocks are reusable.
+                    # The last two latents depend on each window's padded tail.
+                    shared = max(0, min(previous.shape[2] - 2 - offset, latn - 2))
+                    if shared:
+                        prefix = previous[:, :, offset:offset + shared]
+                        frames = frames[shared // 5 * 17:]
+                        reused_blocks += shared // 5
                 if (vh, vw) != (rh, rw):
                     frames = core_h3._resize(frames, rw, rh, "disabled")
                 z_video = vae.encode(frames)
+                if prefix is not None:
+                    z_video = torch.cat((prefix.to(z_video), z_video), dim=2)
                 _cache_put(vkey, vae, z_video)
             video_block = {"kind": "video", "latent_t": z_video.shape[2],
                            "latent_h": rh // 16, "latent_w": rw // 16,
@@ -415,9 +443,9 @@ class ViggleAnimateConditioningWindowed:
                                            "minimax_token_tags": text_token_tags}]])
             prompts.append(f"chunk {i + 1}: frames {a}-{a + n - 1}")
         logging.info("[ViggleAnimateConditioningWindowed] %d chunks over %d frames (%.2fs), "
-                     "rerender_chunk is 1-based: %s",
+                     "rerender_chunk is 1-based: %s; reused %d complete VAE blocks",
                      len(conds), total_f, total_f / FPS,
-                     ", ".join(f"{a}-{b}" for a, b, _, _ in spans))
+                     ", ".join(f"{a}-{b}" for a, b, _, _ in spans), reused_blocks)
 
         # guider_positive exists only so the guider's required `positive` socket
         # has a source — the sampler overwrites it per chunk from the cond_set.
@@ -469,11 +497,7 @@ class ViggleChunkedSampler:
 
     def sample(self, noise, guider, sampler, sigmas, cond_set, vae, seed,
                rerender_chunk, rerender_seed):
-        if not torch.isfinite(sigmas).all() or (sigmas[:-1] <= 0).any() or (sigmas < 0).any():
-            raise ValueError("Viggle Chunked Sampler: sigmas must be finite and positive except for "
-                             "the final zero. A zero before the final point causes division by zero. "
-                             "For the upstream schedule use ManualSigmas: 1.0, 0.8571428571428571, "
-                             "0.6, 0.0. In KJNodes CustomSigmas set interpolate_to_steps to 3, not 4.")
+        _validate_sigmas(sigmas)
         windows = cond_set["spans"]      # (a, b, lat0, latn)
         conds = cond_set["conds"]
         if len(windows) != len(conds) or not conds:
@@ -533,6 +557,15 @@ class ViggleChunkedSampler:
         a1 = min(round((b + 1) / FPS * 40), total_a)
         v = master_v[:, :, lat0:lat0 + latn].clone()
         au = master_a[:, :, :, a0:a1].clone()
+        out_v, out_a = self._sample_window(noise, guider, sampler, sigmas, cond, seed_i,
+                                          ch, cw, a, b, carry, v, au)
+        master_v[:, :, lat0:lat0 + latn] = out_v
+        master_a[:, :, :, a0:a1] = out_a
+        return out_v.cpu(), out_a.cpu()
+
+    def _sample_window(self, noise, guider, sampler, sigmas, cond, seed_i,
+                       ch, cw, a, b, carry, v, au):
+        latn = v.shape[2]
         samples = comfy.nested_tensor.NestedTensor((v, au))
         samples = comfy.sample.fix_empty_latent_channels(guider.model_patcher, samples)
         chunk_latent = {"samples": samples}
@@ -540,7 +573,7 @@ class ViggleChunkedSampler:
         denoise_mask = None
         if carry > 0:  # pin the overlap to the previous chunk's output
             mask_v = torch.ones([1, 1, latn, ch // 16, cw // 16], device=v.device)
-            mask_a = torch.ones([1, 1, 1, a1 - a0], device=au.device)
+            mask_a = torch.ones([1, 1, 1, au.shape[-1]], device=au.device)
             mask_v[:, :, :carry] = 0.0
             denoise_mask = comfy.nested_tensor.NestedTensor((mask_v, mask_a))
 
@@ -561,9 +594,7 @@ class ViggleChunkedSampler:
                 raise RuntimeError(f"Viggle Chunked Sampler: frames {a}-{b} produced NaN/Inf {name} "
                                    "latents. Stopped before caching or carrying them into the next chunk. "
                                    "Check the sigma schedule and model/attention settings.")
-        master_v[:, :, lat0:lat0 + latn] = out_v
-        master_a[:, :, :, a0:a1] = out_a
-        return out_v.cpu(), out_a.cpu()
+        return out_v, out_a
 
     def _sampling_key(self, noise, guider, sampler):
         # Only the stock implementations have a known state contract. Custom

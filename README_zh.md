@@ -120,6 +120,8 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 
 将 **Viggle-Animate Conditioning (H3, Windowed)** 的 `cond_set` 接到 **Viggle Chunked Sampler**，`guider_positive` 接到 BasicGuider 的条件输入（或 CFGGuider 的 positive）。建议从 **124 帧一块、22 帧重叠**开始。重叠区域保留上一块的输出，完整潜变量拼好后统一解码。参考图尽量使用驱动视频中某一帧的重绘版本，输入和输出都使用 24 fps。
 
+使用标准 ComfyUI H3 VAE 时，分窗口条件节点会复用上一窗口中已编码的完整 17 帧块；每个窗口需要补帧的尾部仍单独编码。这样可以减少重复的 VAE 计算，无需降低分辨率、改变精度或增大编码窗口；自定义 VAE 包装类仍采用完整窗口编码。日志会显示复用的块数。分辨率越高、视频越长，编码仍然越耗时。
+
 ### 分块种子控制
 
 | 参数 | 含义 |
@@ -142,6 +144,29 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 - 接缝处仍可能出现动作、身份或光照变化；重叠不保证完全无缝或无卡顿。最后一个窗口可能有更多重叠；为适配 `17k+5` 帧网格，最多会丢弃末尾 **16 帧**。
 - 丢弃模型生成的音频。需要声音时，将驱动视频的音频接到视频保存节点，并与保留下来的视频长度对齐；输入和输出保持 **24 fps**。
 - 无效 sigma 调度或含 NaN/Inf 的分块潜变量会触发明确错误，防止损坏结果进入缓存或传给后续分块。
+
+### 分块循环节点（实验性）
+
+四个节点把同样的分窗口条件变成**图展开循环**，并配合磁盘检查点：每生成一块，就通过你自己的节点解码并保存 —— 采样器不再需要 VAE 输入；中途失败时，已完成的块全部保留：
+
+| 节点 | 作用 |
+|---|---|
+| **Viggle Chunk Loop Start** | 从 `cond_set` 读取分块计划，确定检查点目录，初始化循环状态。 |
+| **Viggle Sample Chunk** | 只采样当前窗口。输出该块的视频 LATENT（供普通 VAE Decode 使用）以及携带状态；返回前先把潜变量写入磁盘检查点。 |
+| **Viggle Chunk Loop End** | 等待本次迭代的解码/保存分支完成，然后展开下一块，或返回完成的集合。 |
+| **Viggle Assemble Chunk Latents** | 把保存的分块拼接（去除重叠）为一个 LATENT，做一次最终解码。`chunk_number > 0` 时只加载某一块用于检查；中断的运行可部分拼接。 |
+
+```text
+Loop Start ─ loop ─────────────────────────┐
+     └ state → Sample Chunk → LATENT → VAE Decode → SaveWEBM ─┐
+                └──────────────────────────────────────────── Loop End
+```
+
+- **解码/保存分支必须接回 Loop End** —— 把保存节点的输出（如 SaveWEBM 的 `images`，或 VHS Video Combine 的 filenames 接到可选的 `after_save`）连到 Loop End，确保上一块完成解码保存后才开始下一块。
+- 检查点以 safetensors 加 `manifest.json` 的形式存放在 `output/viggle_chunks/<run_name>/`；写入是原子操作，崩溃不会留下半有效的块。
+- 打开 `resume` 后重新排队，会恢复所有**图、模型、条件、sigma 和分块种子**仍匹配的块（检查点文件名内嵌该指纹）。设置改变会以新文件名重新采样；旧结果保留在磁盘上。`rerender_chunk` / `rerender_seed` 与单遍采样器一致。
+- 逐块解码的预览包含重叠上下文；最终成片请走 **Viggle Assemble Chunk Latents** → 一次 VAE Decode。
+- 中途终止的运行会在磁盘上保留第 1…k−1 块，manifest 仍然有效：用相同 `run_name` 重新排队即可，只补采缺失的块。
 
 ## 已知局限
 

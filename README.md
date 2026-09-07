@@ -140,6 +140,8 @@ Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The f
 
 Connect **Viggle-Animate Conditioning (H3, Windowed)** to **Viggle Chunked Sampler**. Its `guider_positive` output supplies BasicGuider's conditioning (or CFGGuider's positive). Start with 124-frame chunks and 22-frame overlap. Prior output is preserved in each overlap, and the assembled latent is decoded once. Motion and appearance can still change at joins; use a repainted reference frame from the driving shot and keep the input/output at 24 fps.
 
+Windowed conditioning reuses complete 17-frame encoder blocks from the preceding window when using the standard ComfyUI H3 VAE. Each window's padded tail is still encoded separately. This reduces repeated VAE work without reducing resolution, changing precision or enlarging the encoding window; custom VAE wrappers retain the full-window path. The log reports how many blocks were reused. Higher resolution and longer clips still cost more to encode.
+
 ### Chunk seed controls
 
 | Control | Meaning |
@@ -162,6 +164,29 @@ Keep the same override to retain that take, or change `rerender_seed` for anothe
 - Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. The final window may overlap more than requested, and up to **16 trailing frames** are dropped to fit the `17k+5` frame grid.
 - Generated audio is discarded. Connect the driving clip's audio to the video-saving node and match it to the retained video length; use **24 fps** for input and output.
 - Invalid sigma schedules and NaN/Inf chunk latents now stop with an actionable error before corrupt output is cached or carried into later chunks.
+
+### Chunk loop nodes (experimental)
+
+Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — no VAE input on the sampler, and a failure mid-run keeps every completed chunk:
+
+| Node | Purpose |
+|---|---|
+| **Viggle Chunk Loop Start** | Reads the plan from `cond_set`, picks the checkpoint directory, initializes the loop state. |
+| **Viggle Sample Chunk** | Samples the current window only. Outputs the chunk's video LATENT for an ordinary VAE Decode, plus the carried state. Checkpoints the latent to disk **before** returning. |
+| **Viggle Chunk Loop End** | Waits for this iteration's decode/save branch, then either expands the next chunk or returns the finished collection. |
+| **Viggle Assemble Chunk Latents** | Stitches the saved chunks (trimming overlap) into one LATENT for a single final decode. `chunk_number > 0` loads one chunk for inspection; interrupted runs assemble partially. |
+
+```text
+Loop Start ─ loop ─────────────────────────┐
+     └ state → Sample Chunk → LATENT → VAE Decode → SaveWEBM ─┐
+                └──────────────────────────────────────────── Loop End
+```
+
+- **The decode/save branch must feed Loop End** — connect the saving node's output (e.g. SaveWEBM's `images`, or VHS Video Combine's filenames into the optional `after_save`) so a chunk cannot start before the previous one is decoded and saved.
+- Checkpoints land in `output/viggle_chunks/<run_name>/` as safetensors plus a `manifest.json`; writes are atomic, so a crash never leaves a half-valid chunk.
+- With `resume` on, re-running the queue restores every chunk whose **graph, models, conditioning, sigmas and per-chunk seed** still match (the checkpoint filename embeds that fingerprint). Changed settings sample new files under new names; old takes stay on disk. `rerender_chunk` / `rerender_seed` work as in the single-pass sampler.
+- Decoding each chunk separately means each preview contains overlap context; run the collection through **Viggle Assemble Chunk Latents** → one final VAE Decode for the finished video.
+- A run killed mid-way leaves chunks 1…k−1 on disk and the manifest valid: re-queue with the same `run_name` and only the missing chunks sample.
 
 ## Limitations
 

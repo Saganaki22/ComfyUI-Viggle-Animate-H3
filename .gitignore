@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+
+docs/chunk_loop_plan.md
