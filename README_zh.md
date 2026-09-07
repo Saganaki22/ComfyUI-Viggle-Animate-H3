@@ -118,6 +118,8 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 
 ## 实验性长视频（`exp`）
 
+示例工作流（分窗口条件 + 分块采样器）：[example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json)。
+
 将 **Viggle-Animate Conditioning (H3, Windowed)** 的 `cond_set` 接到 **Viggle Chunked Sampler**，`guider_positive` 接到 BasicGuider 的条件输入（或 CFGGuider 的 positive）。建议从 **124 帧一块、22 帧重叠**开始。重叠区域保留上一块的输出，完整潜变量拼好后统一解码。参考图尽量使用驱动视频中某一帧的重绘版本，输入和输出都使用 24 fps。
 
 使用标准 ComfyUI H3 VAE 时，分窗口条件节点会复用上一窗口中已编码的完整 17 帧块；每个窗口需要补帧的尾部仍单独编码。这样可以减少重复的 VAE 计算，无需降低分辨率、改变精度或增大编码窗口；自定义 VAE 包装类仍采用完整窗口编码。日志会显示复用的块数。分辨率越高、视频越长，编码仍然越耗时。

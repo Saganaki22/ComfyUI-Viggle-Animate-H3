@@ -138,6 +138,8 @@ Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The f
 
 ## Experimental long clips (`exp`)
 
+Example workflow (Windowed Conditioning + Chunked Sampler): [example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json).
+
 Connect **Viggle-Animate Conditioning (H3, Windowed)** to **Viggle Chunked Sampler**. Its `guider_positive` output supplies BasicGuider's conditioning (or CFGGuider's positive). Start with 124-frame chunks and 22-frame overlap. Prior output is preserved in each overlap, and the assembled latent is decoded once. Motion and appearance can still change at joins; use a repainted reference frame from the driving shot and keep the input/output at 24 fps.
 
 Windowed conditioning reuses complete 17-frame encoder blocks from the preceding window when using the standard ComfyUI H3 VAE. Each window's padded tail is still encoded separately. This reduces repeated VAE work without reducing resolution, changing precision or enlarging the encoding window; custom VAE wrappers retain the full-window path. The log reports how many blocks were reused. Higher resolution and longer clips still cost more to encode.
