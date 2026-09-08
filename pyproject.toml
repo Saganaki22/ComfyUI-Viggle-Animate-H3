@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-viggle-animate-h3"
-version = "1.3.0"
+version = "1.3.1"
 description = "ComfyUI nodes for Viggle-Animate (MiniMax-H3 ref2va finetune): character replacement in video from a driving clip and a reference still"
 license = { file = "LICENSE" }
 dependencies = []
