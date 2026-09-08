@@ -2,7 +2,7 @@
 
 **[English](README.md) | [中文](README_zh.md)**
 
-<img width="731" height="468" alt="Screenshot 2026-09-05 214633" src="https://github.com/user-attachments/assets/1b65c73d-555e-4097-a2de-7ae2f5e6851f" />
+<img width="1273" height="817" alt="image" src="https://github.com/user-attachments/assets/f181daf9-3d93-46e8-977a-6c1f15f4b303" />
 
 **[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** 的 ComfyUI 节点 —— 这是对 MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调，用于**视频角色替换**：输入一段驱动视频和一张参考图，即可将视频中的表演者重新渲染为参考图中的角色。动作、运镜、节奏、背景和光线来自视频；身份特征来自图片。
 
