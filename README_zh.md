@@ -20,14 +20,50 @@
 
 也就是说，4-step 并不代表 4 次模型推理，而是 4 个 sigma 点，其中最后一个 `0.0` 是轨迹终点，因此实际只执行 3 次 forward。
 
+## 1.3.0 更新
+
+新增分窗口条件节点和 **Viggle Chunked Sampler**，支持长视频分块生成、潜变量重叠传递、分块缓存复用，以及通过种子覆盖重试某一段。新增从上游 shift-3 调度推导的 **4–8 步自定义 sigma 预设**（按上游计数，即 4、6 或 8 个 sigma 点）。请根据用途和速度需求选择；较长的调度属于实验性扩展，不保证画质更好。
+
 ## 节点
 
-| 节点                                   | 功能                                                                                                        |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| **Load Text Conditioning (Viggle)**  | 从 `models/text_cond/` 下拉加载冻结文本条件                                                                          |
-| **Viggle-Animate Conditioning (H3)** | 构建 conditioning + AV latent：采用视频优先的参考顺序，并将两个参考按画布短边嵌套；默认使用驱动视频的短边尺寸，也可通过 width/height 覆盖 —— 与微调训练时使用的布局一致 |
+本节点包还包含四个循环节点，支持磁盘检查点、外部 VAE 解码和实时分块进度。
+接线、恢复和首次测试步骤见[长视频生成指南](docs/long_video_guide_zh.md)。
 
-其余均使用 ComfyUI 核心节点：**Load Diffusion Model**、**Load LoRA (Model Only)**、**ModelSamplingMiniMaxH3**（shift_video 3.0）、**KSampler**、**VAE Decode**、**Save Video**。使用手动 sigma 工作流时，还会使用 ComfyUI 自带的 **ManualSigmas** 节点。
+| 节点 | 功能 |
+|---|---|
+| **Load Text Conditioning (Viggle)** | 从 `models/text_cond/` 下拉加载冻结文本条件 |
+| **Viggle-Animate Conditioning (H3)** | 构建条件 + AV latent:视频优先的参考顺序,两个参考均按驱动视频短边嵌套 —— 即微调训练时使用的布局 |
+| **Viggle-Animate Conditioning (H3, Windowed)** | 将驱动视频划分为重叠窗口，并为每块构建参考条件；输出 `cond_set` 接分块采样器，`guider_positive` 接 guider |
+| **Viggle Chunked Sampler** | 逐块采样并保留上一块的重叠内容，复用符合条件的缓存，最后统一解码；输出视频帧 `frames` 和分块信息 `chunk_map` |
+| **Viggle Chunk Loop Start** | 创建运行目录并按分块计划启动循环；`initial_state` 留空 |
+| **Viggle Sample Chunk** | 采样并保存当前块；输出 LATENT、循环状态、保存文件名前缀，显示实时进度 |
+| **Viggle Chunk Loop End** | 等待当前块解码及所连接的保存节点完成，再进入下一块 |
+| **Viggle Assemble Chunk Latents** | 加载单块或拼接匹配的检查点链，输出 LATENT 供最终解码，并报告完整/部分状态 |
+
+### 该用哪种工作流？
+
+下载 JSON 工作流，或将对应 PNG 拖入 ComfyUI：
+
+| 工作流 | JSON | PNG |
+|---|---|---|
+| 单镜头（v1.2.0） | [JSON](example_workflows/viggle-animate-h3_workflow-v1.2.0.json) | [PNG](example_workflows/viggle-animate-h3_workflow-v1.2.0.png) |
+| Chunked Sampler：内存缓存，最后统一解码 | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-sampler.png) |
+| Chunked Window Advanced：循环、磁盘检查点、外部解码 | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.png) |
+
+| 用途 | 选择 |
+|---|---|
+| 单镜头，通常为 124 帧（24 fps 下约 5.2 秒） | 原始 Conditioning → 核心采样器 → VAE Decode → 保存 |
+| 长片段，希望接线简单、只在最后解码一次 | Windowed Conditioning → **Viggle Chunked Sampler**；缓存仅在内存中 |
+| 长时间生成、每块预览，或需要取消/重启后恢复 | Windowed Conditioning → **Start / Sample Chunk / End → Assemble → VAE Decode**；检查点保存在磁盘 |
+
+即使只有两块，只要不想丢失已采样的进度，也可以选择循环工作流。
+只需放置一个 Sample Chunk，循环次数由计划自动计算。
+从 **124 帧窗口、22 帧重叠、24 fps** 和下方四点 sigma 基准开始。
+**Chunked Sampler** 内部解码；**Sample Chunk** 输出潜变量，需要外部 VAE Decode。
+
+模型加载和采样控制使用 ComfyUI 核心节点：**Load Diffusion Model**、**Load LoRA (Model Only)**、
+**ModelSamplingMiniMaxH3**（视频/音频 shift 均为 3.0）、**BasicGuider**、**KSamplerSelect** 和 **ManualSigmas**。
+也可使用 KJNodes 的 **CustomSigmas** 输入下方调度。分块采样器内部已完成解码，`frames` 直接连接视频保存节点。
 
 |                                                         驱动视频                                                         |                                                   参考图                                                   |                                                          输出                                                          |
 | :------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------: |
@@ -45,6 +81,8 @@
 cd ComfyUI/custom_nodes
 git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 ```
+
+更新后重启 ComfyUI 并刷新浏览器，以加载实时进度扩展。
 
 ## 模型下载
 
@@ -123,6 +161,8 @@ ComfyUI/models/vae/
 
 ## 工作流配置
 
+单镜头工作流的接线（核心采样路径）：
+
 ```text
 Load Diffusion Model (viggle pruned_int8_convrot)
   -> Load LoRA (Model Only) (viggle_animate_dmd_lora_r64, strength 1)
@@ -135,168 +175,113 @@ Load VAE (MiniMax-H3 video VAE) ---------------+                                
 Load Text Conditioning (Viggle) ---------------+                              Sampler --+--> VAE Decode -> Save Video
 ```
 
-关键设置：
+- **上游采样基准：** 使用 **ManualSigmas** 输入 `1.0, 0.8571428571428571, 0.6, 0.0`，搭配 **Euler**、**BasicGuider**（或 CFG 1.0），以及原始 `viggle_animate_dmd_lora.safetensors`，强度 1.0。将 sigma 输出连接到 SamplerCustomAdvanced 或 Viggle Chunked Sampler。四个 sigma 点对应 **3 次模型计算**，即上游所称的“4 步”。
+- **ModelSamplingMiniMaxH3** 的视频、音频 shift 都保留 **3.0**。它不会再次变换手动输入的 sigma 列表；不要在列表后再接 sigma 变换节点。
+- **KJNodes CustomSigmas：** 上述四个值应配合 `interpolate_to_steps = 3`。设为 4 会对包含零的序列做对数插值，得到以 `0, 0` 结尾的调度；Euler 随后除以零，产生 NaN，导致最终视频和后续分块变黑。分块采样器现在会在渲染前拒绝这种无效调度。
+- **Load Video：** 使用 `force_rate = 24`。单段生成时，`frame_load_cap` 与条件节点的 `length` 一致（例如 124）。分窗口生成时加载所需的完整视频；VHS 的 `frame_load_cap = 0` 表示加载全部帧。
+- **width/height 设为 0** 表示继承驱动视频尺寸；显式设置时决定输出画布，每轴取整到 32。测试画布范围：**0.4–1.2 百万像素** —— 1.2 MP 下画质依然可靠，但驱动视频和参考图必须足够清晰，不能有像素化。
+- 推荐采样范围为 **4–8 步**，其中 **6 步是速度与质量之间的最佳平衡点**。
+- 已测试的采样器/调度包括 `euler`、`er_sde`、`exp_heun_2_x0`、`lcm` / `simple`、`normal`、`beta`、`bong_tangent`，配合 CFG 1.0 与 shift 3.0。
+- 仓库内工作流同时包含普通 scheduler 配置和根据上游公式推导的手动 sigma 配置（经 KJNodes **CustomSigmas** 内置在工作流文件中）。
+- 其他采样器、调度和 rank-64 LoRA 属于可尝试的替代方案。旧版示例工作流使用的 LCM / bong_tangent 八步配置与上游基准不同。
+- 可叠加 Comfy Kitchen 和 block sparse attention 补丁。
 
-* 推荐采样范围为 **4–8 步**
-* **6 步是推荐的速度 / 质量甜点位**
-* `cfg 1.0`
-* **ModelSamplingMiniMaxH3：`shift_video 3.0`**
-* 驱动视频长度应与输出长度一致：将 **Load Video** 的 `frame_load_cap` 设置为 conditioning 节点的 `length`，例如 `124`
-* **Load Video** 建议使用 `force_rate = 24`
-* `width = 0` / `height = 0` 时，默认继承驱动视频尺寸
-* 手动指定 width / height 时，每个轴会取整到 32 的倍数
-* 测试画布范围约为 **0.4–0.98 百万像素**
-* 可与 **Comfy Kitchen** 和 **block sparse attention** 补丁叠加使用
+## 自定义 sigma 预设（上游计数 4–8 步）
 
-## 采样器与 Manual Sigmas
+将下方任一列表粘贴到 **ManualSigmas** 或 KJNodes **CustomSigmas**，并将其 `SIGMAS` 输出连接采样器。公式为 `sigma = 3*t / (1 + 2*t)`，其中 `t` 从 1 到 0 等间隔取值。四点预设匹配上游基准，六点和八点预设按同一规律扩展。
 
-### 普通 Scheduler
+| 建议的工作流节点标题 | sigma 点数（包含末尾零） | 采样更新次数 / KJNodes `interpolate_to_steps` |
+|---|---|---|
+| **Viggle DMD — 3 Steps (Upstream “4-Step”)** | 4 | **3** |
+| **Viggle — 5 Steps (6 Sigma Points)** | 6 | **5** |
+| **Viggle — 7 Steps (8 Sigma Points)** | 8 | **7** |
 
-对于 ComfyUI 的普通 scheduler 工作流，推荐使用 **6–8 步**。
-
-可使用：
-
-```text
-simple
-beta
-normal
-bong_tangent
-```
-
-也测试过：
-
-```text
-euler
-er_sde
-exp_heun_2_x0
-lcm
-```
-
-其中 **6 步通常是速度与质量之间最好的平衡点**。
-
-如果更看重速度，可以尝试 4 步；如果希望进一步提高稳定性或质量，可以尝试 8 步。
-
-## Manual Sigmas
-
-仓库中的工作流还包含使用 ComfyUI 自带 **ManualSigmas** 节点的版本。
-
-这些 sigma 数值并不是任意手调的，而是**根据上游采样公式推导得到的**。
-
-这里最重要的一点是：
-
-> ManualSigmas 中的“step 数”指 sigma 点数量，其中包含最后的 `0.0`。
-
-因此：
-
-```text
-4 steps = 4 个 sigma 点 = 3 次 forward
-6 steps = 6 个 sigma 点 = 5 次 forward
-8 steps = 8 个 sigma 点 = 7 次 forward
-```
-
-原因是相邻两个 sigma 点之间才对应一次采样更新。
-
-例如：
-
-```text
-sigma_0 -> sigma_1
-sigma_1 -> sigma_2
-sigma_2 -> sigma_3
-```
-
-4 个 sigma 点只有 3 个区间，因此只需要 **3 次模型前向传播**。
-
-### 4-step Manual Sigmas
-
-**4 个 sigma 点 / 3 次 forward**
-
-在 ComfyUI 自带的 **ManualSigmas** 节点中输入：
+**4 点：最快的基准配置**
 
 ```text
 1.0, 0.8571428571428571, 0.6, 0.0
 ```
 
-对应关系：
-
-```text
-4 sigma points
-→ 3 个采样区间
-→ 3 次模型 forward
-```
-
-这是提供的最快手动 sigma 配置。
-
-### 6-step Manual Sigmas
-
-**6 个 sigma 点 / 5 次 forward**
-
-输入：
-
+**6 点：中等采样开销**
 ```text
 1.0, 0.9230769230769231, 0.8181818181818182, 0.6666666666666666, 0.42857142857142855, 0.0
 ```
 
-对应：
+推荐优先使用这一组：通常是速度与质量之间最好的平衡点。追求最快选 4 点，更偏向质量与稳定性选 8 点。
 
-```text
-6 sigma points
-→ 5 个采样区间
-→ 5 次模型 forward
-```
-
-**推荐优先使用这一组。**
-
-它通常是速度和质量之间最好的平衡点。
-
-### 8-step Manual Sigmas
-
-**8 个 sigma 点 / 7 次 forward**
-
-输入：
+**8 点：更多采样更新，偏向质量与稳定性**
 
 ```text
 1.0, 0.9473684210526315, 0.8823529411764706, 0.8, 0.6923076923076923, 0.5454545454545454, 0.3333333333333333, 0.0
 ```
 
-对应：
+保留 **Euler**、**BasicGuider / CFG 1.0** 和视频/音频 shift **3.0 / 3.0**。末尾的 `0.0` 必须保留：它是最后一次更新的终点，无需在零处再执行模型。不要追加第二个零，也不要再次 shift 这些列表。大多数渲染建议从 **6 点**开始：追求最快用 4 点，更看重质量与稳定性用 8 点。编码和最终解码的耗时不会随采样步数一起消失。
+
+## 长视频生成
+
+示例工作流（分窗口条件 + 分块采样器）：[example_workflows/viggle-animate-h3_workflow-chunked-sampler.json](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json)。
+
+将 **Viggle-Animate Conditioning (H3, Windowed)** 的 `cond_set` 接到 **Viggle Chunked Sampler**，`guider_positive` 接到 BasicGuider 的条件输入（或 CFGGuider 的 positive）。建议从 **124 帧一块、22 帧重叠**开始。重叠区域保留上一块的输出，完整潜变量拼好后统一解码。参考图尽量使用驱动视频中某一帧的重绘版本，输入和输出都使用 24 fps。
+
+使用标准 ComfyUI H3 VAE 时，分窗口条件节点会复用上一窗口中已编码的完整 17 帧块；每个窗口需要补帧的尾部仍单独编码。这样可以减少重复的 VAE 计算，无需降低分辨率、改变精度或增大编码窗口；自定义 VAE 包装类仍采用完整窗口编码。日志会显示复用的块数。分辨率越高、视频越长，编码仍然越耗时。
+
+### 分块种子控制
+
+| 参数 | 含义 |
+|---|---|
+| `seed` | 基础采样种子：第 1 块使用 `seed`，第 2 块使用 `seed + 1`，依此类推。两个 Viggle 采样器都在内部生成标准噪声，更新旧工作流时请移除 noise 连线。 |
+| `rerender_chunk` | 要覆盖种子的分块编号，**从 1 开始**；**0 表示关闭覆盖**。请使用 `chunk_map` 中实际存在的编号。 |
+| `rerender_seed` | 仅用于所选分块的替代种子。`rerender_chunk = 0` 时无效；种子数值 0 本身是有效的。 |
+
+这些参数用于从某个效果不理想的分块开始尝试另一种结果，无需修改整段视频的基础种子。例如基础 `seed = 58` 时，四块的种子为 `58, 59, 60, 61`。设置 `rerender_chunk = 2`、`rerender_seed = 123` 后变为 `58, 123, 60, 61`。第 1 块可从缓存复用；覆盖值改变后，第 2–4 块需要重新生成，因为每块都依赖上一块传入的内容。后续块即使种子数值相同，结果也会受变化的重叠内容影响。
+
+保持覆盖值即可保留这次选择；更换 `rerender_seed` 可尝试另一个结果。它是种子覆盖功能，并非强制刷新按钮：设置不变时仍可能命中缓存。将 `rerender_chunk` 改回 0 会恢复基础种子序列。`chunk_map` 会显示帧范围、种子、重叠量，以及 `[cached]`（缓存）或 `[rendered]`（本次生成）标记。
+
+### 分块与重渲染的局限
+
+- 不能只修改一块并保持后续所有块不变，因为重叠内容会向后传递。所选分块从上一块继承的开头仍被固定，不会随该块重渲染而重绘。
+- 缓存仅在内存中，不是保存到磁盘的检查点或断点续跑功能。重启 ComfyUI 会清空缓存；缓存淘汰、输入/模型/采样设置改变或条目过大，都可能导致前面的块也重新生成。
+- 标准 guider 对象、可检查的模型/采样器设置支持缓存复用。无法可靠检查的自定义选项、回调或补丁会跳过缓存，但仍正常采样；使用补丁的工作流可能每次重渲染全部分块。
+- 分块缓存保留输出精度，CPU 张量存储上限为 **2 GiB**。参考编码另有 **256 MiB / 64 条**限制。超出容量的条目不会缓存。
+- 即使前面的块命中缓存，最后仍会重新解码完整视频。整段条件、主潜变量、最终解码和输出帧仍占用内存；分块不能保证任意长度的视频都能放入内存/显存。
+- 接缝处仍可能出现动作、身份或光照变化；重叠不保证完全无缝或无卡顿。最后一个窗口可能有更多重叠；为适配 `17k+5` 帧网格，最多会丢弃末尾 **16 帧**。
+- 丢弃模型生成的音频。需要声音时，将驱动视频的音频接到视频保存节点，并与保留下来的视频长度对齐；输入和输出保持 **24 fps**。
+- 无效 sigma 调度或含 NaN/Inf 的分块潜变量会触发明确错误，防止损坏结果进入缓存或传给后续分块。
+
+### 分块循环节点
+
+每个节点的完整说明（接口、输出槽顺序、恢复规则、典型流程）：[docs/long_video_guide.md](docs/long_video_guide.md)。实测示例工作流：[example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json)。
+
+四个节点把同样的分窗口条件变成**图展开循环**，并配合磁盘检查点：每生成一块，就通过你自己的节点解码并保存 —— 采样器不再需要 VAE 输入；中途失败时，已完成的块全部保留：
+
+| 节点 | 作用 |
+|---|---|
+| **Viggle Chunk Loop Start** | 从 `cond_set` 读取分块计划，确定检查点目录，初始化循环状态。 |
+| **Viggle Sample Chunk** | 只采样当前窗口。输出该块的视频 LATENT（供普通 VAE Decode 使用）以及携带状态；返回前先把潜变量写入磁盘检查点。 |
+| **Viggle Chunk Loop End** | 等待本次迭代的解码/保存分支完成，然后展开下一块，或返回完成的集合。 |
+| **Viggle Assemble Chunk Latents** | 把保存的分块拼接（去除重叠）为一个 LATENT，做一次最终解码。`chunk_number > 0` 时只加载某一块用于检查；中断的运行可部分拼接。 |
 
 ```text
-8 sigma points
-→ 7 个采样区间
-→ 7 次模型 forward
+Loop Start ─ loop ───────────────────────────────┐
+     └ state → Sample Chunk → LATENT → VAE Decode ─┬→ Loop End (images)
+                                                   └→ Video Combine → filenames ↗ (after_save)
 ```
 
-这组会执行更多模型计算，更偏向质量和稳定性。
-
-### 应该选哪个？
-
-建议从 **6 步**开始：
-
-```text
-4 steps / 3 forwards → 最快
-6 steps / 5 forwards → 推荐，速度 / 质量最佳平衡
-8 steps / 7 forwards → 更偏向质量与稳定性
-```
-
-如果使用普通 scheduler：
-
-```text
-6–8 steps
-simple / beta / normal / bong_tangent
-```
-
-是比较推荐的起点。
-
-如果使用仓库内提供的 **ManualSigmas 工作流**，则直接使用上面的 4 / 6 / 8 sigma 配置即可。
-
-这些手动 sigma 已经包含在仓库的工作流中。
+- **解码/保存分支必须接回 Loop End** —— 把 VAE Decode 的 images 接到 `images`，Video Combine 的 `filenames` 输出接到 `after_save`，确保上一块完成解码保存后才开始下一块。（核心 SaveWEBM 也可以：其 `images` 输出直接接 `images`。）
+- 检查点以 safetensors 加 `manifest.json` 的形式存放在 `output/viggle_chunks/<run_name>/`；写入是原子操作，崩溃不会留下半有效的块。
+- 打开 `resume` 后重新排队，会恢复所有**图、模型、条件、sigma 和分块种子**仍匹配的块（检查点文件名内嵌该指纹）。设置改变会以新文件名重新采样；旧结果保留在磁盘上。`rerender_chunk` / `rerender_seed` 与单遍采样器一致。
+- 逐块解码的预览包含重叠上下文；最终成片请走 **Viggle Assemble Chunk Latents** → 一次 VAE Decode。
+- 解码或保存预览失败时，当前块的潜变量检查点也已保存。使用相同 `run_name` 并启用 `resume`，即可重试预览，无需重新采样匹配的块。重放预览失败不会截短已有的完整 manifest。
+- Sample Chunk 根据种子在内部生成标准噪声，不再提供 noise 输入；更新旧工作流时请移除旧 noise 连线。通过连线提供模型文件名时，会保守检查该模型类别下的文件元数据，因此同类别其他文件的变化也可能使恢复失效。代码更新会使自动恢复失效，但旧潜变量文件仍可读取。
+- Sample Chunk 的只读 `live_progress` 文本框会实时显示每块的采样、恢复和解码/保存进度，无需额外节点或连线。更新后请重启 ComfyUI 并刷新浏览器。“循环完成”不代表下游最终拼接、解码和保存已完成；Start、End 和 Assemble 保留 STRING 状态输出。
+- 每块解码及保存完成后，才开始采样下一块。ComfyUI 执行缓存可能在内存中保留各块图像（124 帧、1024×576、float32 RGB 每块约 0.82 GiB）。要永久保存预览视频，请打开 Video Combine 的 `save_output`；潜变量检查点独立保存。
 
 ## 已知局限
 
 * **重新入镜时身份漂移**：当主体离开镜头后重新入镜时，重新出现的主体可能逐渐趋向驱动视频中的原始外观，而不是参考图中的角色。
 * **大幅动作时身份保持下降**：当主体姿态与参考图差异很大，或者进行突然、剧烈的动作（例如后空翻）时，身份保持能力会减弱。与参考图姿态差异越大，reference identity 的约束通常越弱。
 * **口型同步限制**：生成角色不会稳定地与驱动视频中的口型保持同步。
-* **参考图兼容性**：如果输出中的角色无法很好地保持参考图身份，建议让参考图中的人物姿态 / 站姿尽可能接近驱动视频中的人物，并尽可能保持相似背景。遇到明显 identity drift 时，建议将生成分辨率控制在 **0.4–0.6 MP**，并尝试 **LCM 或 normal + 6–8 步**。
+* **参考图兼容性**：如果输出中的角色无法很好地保持参考图身份，建议让参考图中的人物姿态 / 站姿尽可能接近驱动视频中的人物，并尽可能保持相似背景。遇到明显 identity drift 时，建议将生成分辨率控制在 **0.4–0.6 MP**，并尝试 **LCM 或 normal + 6–8 步**。更高分辨率实测到 **1.2 MP** 仍然可靠，但前提是驱动视频和参考图本身足够清晰、没有像素化。
 
 ## 链接
 
@@ -323,6 +308,8 @@ simple / beta / normal / bong_tangent
 * **权重**是 MiniMax H3 的模型衍生品 —— [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3) 适用于这些权重。在重新分发或将其用于产品之前，请先阅读相关许可条款。这也包括上面链接的转换版和量化版权重。
 * 本**节点包**采用 Apache 2.0 许可（见 `LICENSE`）。
 * 该模型可以将人物身份替换进其未参与拍摄的视频中；身份来源于你提供的参考图片。请勿在未获得本人同意的情况下使用他人身份，并建议明确标注生成内容为 AI 生成内容（参见原始仓库的 intended-use 部分）。
+
+Viggle Chunked Sampler 也提供 live_progress，显示逐块采样、缓存复用和最终解码。保留 chunk_map 详细报告；该采样器仅支持内存缓存。
 
 ## 问题反馈
 
