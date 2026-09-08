@@ -17,7 +17,7 @@ Viggle team with Qwen3-VL (`assets/fixed_prompt.txt`), identical for every rende
 DMD2-distilled — **4 steps (3 forward passes)**, so a 124-frame shot is fast even on consumer
 hardware.
 
-## New in 1.4.0
+## New in 1.3.0
 
 Added windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added custom sigma presets covering upstream-style **4–8 steps** (4, 6 or 8 sigma points), derived from the upstream shift-3 schedule. Choose the preset that fits your use case and speed budget; the longer schedules are experimental and do not guarantee better quality.
 
