@@ -4,14 +4,21 @@
 
 <img width="731" height="468" alt="Screenshot 2026-09-05 214633" src="https://github.com/user-attachments/assets/1b65c73d-555e-4097-a2de-7ae2f5e6851f" />
 
-**[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** 的 ComfyUI 节点 —— 这是对
-MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调,用于**视频角色替换**:输入一段驱动视频和
-一张参考图,即可将视频中的表演者替换为参考图中的角色。动作、运镜、节奏、背景和光线来自视频;
-身份特征来自图片。
+**[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate)** 的 ComfyUI 节点 —— 这是对 MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调，用于**视频角色替换**：输入一段驱动视频和一张参考图，即可将视频中的表演者重新渲染为参考图中的角色。动作、运镜、节奏、背景和光线来自视频；身份特征来自图片。
 
-无需文本编码器、无需提示词:条件输入是 Viggle 团队用 Qwen3-VL 预先计算一次的 362 token
-冻结嵌入(`assets/fixed_prompt.txt`),每次渲染完全相同。采样器经过 DMD2 蒸馏 ——
-**4 步(3 次前向传播)**,即使在消费级硬件上,124 帧片段也很快。
+无需文本编码器、无需提示词：条件输入是 Viggle 团队使用 Qwen3-VL 预先计算一次的 362 token 冻结嵌入（`assets/fixed_prompt.txt`），每次渲染完全相同。
+
+采样器经过 DMD2 蒸馏，推荐使用 **4–8 步**，其中 **6 步是速度与质量之间的最佳平衡点**。仓库内附带的工作流同时包含普通 scheduler 配置以及**根据上游采样公式推导出的手动 sigma 配置**，可直接使用 ComfyUI 自带的 **ManualSigmas** 节点。
+
+需要注意：手动 sigma 中所谓的“步数”指的是 **sigma 点数量，并包含最后的 `0.0`**。因此：
+
+```text
+4 个 sigma 点 = 4 步 = 3 次模型前向传播
+6 个 sigma 点 = 6 步 = 5 次模型前向传播
+8 个 sigma 点 = 8 步 = 7 次模型前向传播
+```
+
+也就是说，4-step 并不代表 4 次模型推理，而是 4 个 sigma 点，其中最后一个 `0.0` 是轨迹终点，因此实际只执行 3 次 forward。
 
 ## 1.3.0 更新
 
@@ -58,14 +65,13 @@ MiniMax-H3 `ref2va` transformer 的 33.1 B 全量微调,用于**视频角色替�
 **ModelSamplingMiniMaxH3**（视频/音频 shift 均为 3.0）、**BasicGuider**、**KSamplerSelect** 和 **ManualSigmas**。
 也可使用 KJNodes 的 **CustomSigmas** 输入下方调度。分块采样器内部已完成解码，`frames` 直接连接视频保存节点。
 
-| 驱动视频 | 参考图 | 输出 |
-|:---:|:---:|:---:|
+|                                                         驱动视频                                                         |                                                   参考图                                                   |                                                          输出                                                          |
+| :------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------: |
 | <video src="https://github.com/user-attachments/assets/2529857c-2667-4641-9d2e-5dcb3c03913d" controls muted></video> | <img src="https://github.com/user-attachments/assets/f6adf969-03d5-4a58-bd30-5ec2d0bc604b" width="300"> | <video src="https://github.com/user-attachments/assets/deedde68-80de-47d2-9e1f-7eaa3bc35457" controls muted></video> |
 
-| 示例 1 | 示例 2 | 示例 3 | 示例 4 |
-|:---:|:---:|:---:|:---:|
+|                                                         示例 1                                                         |                                                         示例 2                                                         |                                                         示例 3                                                         |                                                         示例 4                                                         |
+| :------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------: |
 | <video src="https://github.com/user-attachments/assets/c5198b4c-9544-4e5a-bd1e-83ae4477bb0b" controls muted></video> | <video src="https://github.com/user-attachments/assets/afb74de1-3d3d-42ae-9885-1d5b1c6e86af" controls muted></video> | <video src="https://github.com/user-attachments/assets/5ddf1bb1-e744-406b-8b9f-2b729e4ecc4b" controls muted></video> | <video src="https://github.com/user-attachments/assets/8d02389d-67ca-46f0-b9e3-78994d944a90" controls muted></video> |
-
 
 ### euler / beta - 6 步
 
@@ -78,41 +84,105 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 
 更新后重启 ComfyUI 并刷新浏览器，以加载实时进度扩展。
 
-### 权重 —— 已转换的 ComfyUI 原生格式:[drbaph/Viggle-Animate-ComfyUI](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI)
+## 模型下载
 
-**扩散模型** → `ComfyUI/models/diffusion_models/`
+### 权重 —— 已转换的 ComfyUI 原生格式
 
-| 文件 | 大小 | 说明 |
-|---|---|---|
-| [minimax_h3_ref2va_viggle_bf16.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_bf16.safetensors) | 66.3 GB | 全精度 —— 需要 ≥ 96 GB 显存或 offload |
-| [minimax_h3_ref2va_viggle_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_int8_convrot.safetensors) | 47 GB | int8 权重(convrot 量化) |
-| [minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors) | 21 GB | + 低秩 `adaln_proj` —— **适配 32 GB 显卡,推荐** |
+[drbaph/Viggle-Animate-ComfyUI](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI)
 
-**DMD LoRA** → `ComfyUI/models/loras/`(将采样压缩到 4 步的蒸馏增量 ——
-必需;它是作用于*微调后* transformer 的增量,不是原版 MiniMax 的)
+### 扩散模型
 
-| 文件 | 大小 | 说明 |
-|---|---|---|
-| [viggle_animate_dmd_lora.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora.safetensors) | 3.8 GB | 原始 rank 128,无损转换 |
-| [viggle_animate_dmd_lora_r64.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r64.safetensors) | 0.94 GB | SVD 截断,保留 99.26% 谱能量 |
+放入：
 
-**冻结文本条件** → `ComfyUI/models/text_cond/`
+```text
+ComfyUI/models/diffusion_models/
+```
 
-| 文件 | 说明 |
-|---|---|
-| [fixed_embed_fwd_anyframe.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/text_cond/fixed_embed_fwd_anyframe.safetensors) | 362 token 冻结嵌入 —— 完全替代文本编码器 |
+| 文件                                                                                                                                                                                                      |      大小 | 说明                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | ------------------------------------------- |
+| [minimax_h3_ref2va_viggle_bf16.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_bf16.safetensors)                               | 66.3 GB | BF16，全精度版本，质量最高；通常需要 ≥96 GB 显存或进行 offload   |
+| [minimax_h3_ref2va_viggle_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_int8_convrot.safetensors)               |   47 GB | int8 权重（convrot 量化）                         |
+| [minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors) |   21 GB | + 低秩 `adaln_proj`，显存友好版本；**适配 32 GB 显卡，推荐** |
 
-**VAE**(来自基础模型,非微调仓库)→ `ComfyUI/models/vae/`
-来自 [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3):
-`vae/minimax_h3_video_vae_fp16.safetensors` 和 `vae/minimax_h3_audio_vae_fp32.safetensors`
+### DMD LoRA
+
+放入：
+
+```text
+ComfyUI/models/loras/
+```
+
+DMD LoRA 是低步数采样所使用的蒸馏增量。它作用于**已经完成 Viggle 微调的 transformer**，不是作用于原版 MiniMax-H3。
+
+| 文件                                                                                                                                                         |      大小 | 说明                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | -------------------------- |
+| [viggle_animate_dmd_lora.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora.safetensors)         |  3.8 GB | 原始 full-rank / rank 128 版本 |
+| [viggle_animate_dmd_lora_r64.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/loras/viggle_animate_dmd_lora_r64.safetensors) | 0.94 GB | rank 64，推荐；体积更小            |
+
+### 冻结文本条件
+
+放入：
+
+```text
+ComfyUI/models/text_cond/
+```
+
+| 文件                                                                                                                                                       | 说明                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [fixed_embed_fwd_anyframe.safetensors](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI/resolve/main/text_cond/fixed_embed_fwd_anyframe.safetensors) | 362 token 冻结嵌入 —— 完全替代文本编码器，使用 **Load Text Conditioning (Viggle)** 加载 |
+
+### VAE
+
+放入：
+
+```text
+ComfyUI/models/vae/
+```
+
+可选：
+
+* [minimax_h3_video_vae_int8_convrot.safetensors](https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/minimax_h3_video_vae_int8_convrot.safetensors)（3.17 GB，低显存）
+* [minimax_h3_video_vae_fp16.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors)（5.21 GB）
+
+## 模型目录结构
+
+```text
+📂 ComfyUI/
+├── 📂 models/
+│   ├── 📂 diffusion_models/
+│   │   └── minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors
+│   ├── 📂 loras/
+│   │   └── viggle_animate_dmd_lora_r64.safetensors
+│   ├── 📂 text_cond/
+│   │   └── fixed_embed_fwd_anyframe.safetensors
+│   └── 📂 vae/
+│       └── minimax_h3_video_vae_int8_convrot.safetensors
+```
 
 ## 工作流配置
+
+单镜头工作流的接线（核心采样路径）：
+
+```text
+Load Diffusion Model (viggle pruned_int8_convrot)
+  -> Load LoRA (Model Only) (viggle_animate_dmd_lora_r64, strength 1)
+  -> ModelSamplingMiniMaxH3 (shift_video 3.0)
+  -> KSampler / SamplerCustom
+
+Load Video (24 fps, frame_load_cap = length) --+
+Load Image (参考图) ----------------------------+--> Viggle-Animate Conditioning (H3) --+
+Load VAE (MiniMax-H3 video VAE) ---------------+                                       |
+Load Text Conditioning (Viggle) ---------------+                              Sampler --+--> VAE Decode -> Save Video
+```
 
 - **上游采样基准：** 使用 **ManualSigmas** 输入 `1.0, 0.8571428571428571, 0.6, 0.0`，搭配 **Euler**、**BasicGuider**（或 CFG 1.0），以及原始 `viggle_animate_dmd_lora.safetensors`，强度 1.0。将 sigma 输出连接到 SamplerCustomAdvanced 或 Viggle Chunked Sampler。四个 sigma 点对应 **3 次模型计算**，即上游所称的“4 步”。
 - **ModelSamplingMiniMaxH3** 的视频、音频 shift 都保留 **3.0**。它不会再次变换手动输入的 sigma 列表；不要在列表后再接 sigma 变换节点。
 - **KJNodes CustomSigmas：** 上述四个值应配合 `interpolate_to_steps = 3`。设为 4 会对包含零的序列做对数插值，得到以 `0, 0` 结尾的调度；Euler 随后除以零，产生 NaN，导致最终视频和后续分块变黑。分块采样器现在会在渲染前拒绝这种无效调度。
 - **Load Video：** 使用 `force_rate = 24`。单段生成时，`frame_load_cap` 与条件节点的 `length` 一致（例如 124）。分窗口生成时加载所需的完整视频；VHS 的 `frame_load_cap = 0` 表示加载全部帧。
-- **width/height 设为 0** 表示继承驱动视频尺寸；显式设置时决定输出画布，每轴取整到 32。测试画布范围：**0.4–0.98 百万像素**。
+- **width/height 设为 0** 表示继承驱动视频尺寸；显式设置时决定输出画布，每轴取整到 32。测试画布范围：**0.4–1.2 百万像素** —— 1.2 MP 下画质依然可靠，但驱动视频和参考图必须足够清晰，不能有像素化。
+- 推荐采样范围为 **4–8 步**，其中 **6 步是速度与质量之间的最佳平衡点**。
+- 已测试的采样器/调度包括 `euler`、`er_sde`、`exp_heun_2_x0`、`lcm` / `simple`、`normal`、`beta`、`bong_tangent`，配合 CFG 1.0 与 shift 3.0。
+- 仓库内工作流同时包含普通 scheduler 配置和根据上游公式推导的手动 sigma 配置（经 KJNodes **CustomSigmas** 内置在工作流文件中）。
 - 其他采样器、调度和 rank-64 LoRA 属于可尝试的替代方案。旧版示例工作流使用的 LCM / bong_tangent 八步配置与上游基准不同。
 - 可叠加 Comfy Kitchen 和 block sparse attention 补丁。
 
@@ -133,18 +203,19 @@ git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 ```
 
 **6 点：中等采样开销**
-
 ```text
 1.0, 0.9230769230769231, 0.8181818181818182, 0.6666666666666666, 0.42857142857142855, 0.0
 ```
 
-**8 点：更多采样更新**
+推荐优先使用这一组：通常是速度与质量之间最好的平衡点。追求最快选 4 点，更偏向质量与稳定性选 8 点。
+
+**8 点：更多采样更新，偏向质量与稳定性**
 
 ```text
 1.0, 0.9473684210526315, 0.8823529411764706, 0.8, 0.6923076923076923, 0.5454545454545454, 0.3333333333333333, 0.0
 ```
 
-保留 **Euler**、**BasicGuider / CFG 1.0** 和视频/音频 shift **3.0 / 3.0**。末尾的 `0.0` 必须保留：它是最后一次更新的终点，无需在零处再执行模型。不要追加第二个零，也不要再次 shift 这些列表。减少更新次数可提高速度；较长调度是否改善效果应在自己的素材上比较。编码和最终解码的耗时不会随采样步数一起消失。
+保留 **Euler**、**BasicGuider / CFG 1.0** 和视频/音频 shift **3.0 / 3.0**。末尾的 `0.0` 必须保留：它是最后一次更新的终点，无需在零处再执行模型。不要追加第二个零，也不要再次 shift 这些列表。大多数渲染建议从 **6 点**开始：追求最快用 4 点，更看重质量与稳定性用 8 点。编码和最终解码的耗时不会随采样步数一起消失。
 
 ## 长视频生成
 
@@ -207,22 +278,21 @@ Loop Start ─ loop ────────────────────
 
 ## 已知局限
 
-- **重新入镜时身份漂移**:当主体离开镜头后重新入镜,画面会趋向驱动视频中的原始外观,
-  而非参考图。当主体大幅偏离参考姿态或做出剧烈动作(如后空翻)时同样如此 ——
-  与参考图的姿态差距越大,身份保持越弱。
-- **口型同步：** 生成角色不能可靠地保持与驱动视频一致的口型同步。
-- **参考图兼容性：** 身份保持较差时，让参考图人物的姿态、站位和背景尽量接近驱动视频；先在 **0.4–0.6 百万像素**下测试，再比较不同采样设置。
+* **重新入镜时身份漂移**：当主体离开镜头后重新入镜时，重新出现的主体可能逐渐趋向驱动视频中的原始外观，而不是参考图中的角色。
+* **大幅动作时身份保持下降**：当主体姿态与参考图差异很大，或者进行突然、剧烈的动作（例如后空翻）时，身份保持能力会减弱。与参考图姿态差异越大，reference identity 的约束通常越弱。
+* **口型同步限制**：生成角色不会稳定地与驱动视频中的口型保持同步。
+* **参考图兼容性**：如果输出中的角色无法很好地保持参考图身份，建议让参考图中的人物姿态 / 站姿尽可能接近驱动视频中的人物，并尽可能保持相似背景。遇到明显 identity drift 时，建议将生成分辨率控制在 **0.4–0.6 MP**，并尝试 **LCM 或 normal + 6–8 步**。更高分辨率实测到 **1.2 MP** 仍然可靠，但前提是驱动视频和参考图本身足够清晰、没有像素化。
 
 ## 链接
 
-- 原始模型 + 推理代码:[huggingface.co/Viggle/Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate) · [viggle.ai](https://viggle.ai)
-- 基础模型:[huggingface.co/MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-- Comfy 重新打包的基础 VAE:[huggingface.co/Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
-- 转换后的 ComfyUI 权重、量化与 LoRA:[huggingface.co/drbaph/Viggle-Animate-ComfyUI](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI)
+* 原始模型 + 推理代码：[huggingface.co/Viggle/Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animate) · [viggle.ai](https://viggle.ai)
+* 基础模型：[huggingface.co/MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
+* Comfy 重新打包的基础 VAE：[huggingface.co/Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
+* 转换后的 ComfyUI 权重、量化与 LoRA：[huggingface.co/drbaph/Viggle-Animate-ComfyUI](https://huggingface.co/drbaph/Viggle-Animate-ComfyUI)
 
 ## 引用
 
-如果在已发表的工作中使用该模型,请引用原文:
+如果在已发表的工作中使用该模型，请引用原始项目：
 
 ```bibtex
 @misc{viggle2026animate,
@@ -235,11 +305,12 @@ Loop Start ─ loop ────────────────────
 
 ## 许可与负责任使用
 
-- **权重**是 MiniMax H3 的模型衍生品 ——
-  [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-  适用于它们(在再分发或用于产品之前请阅读)。这包括上面链接的转换/量化变体。
-- 本**节点包**采用 Apache 2.0 许可(见 `LICENSE`)。
-- 该模型可以将人物放入其未参与拍摄的视频中;身份来自你提供的图片。
-  请勿在未获同意的人身上使用,并将生成内容标注为 AI 生成(见原始仓库的 intended-use 部分)。
+* **权重**是 MiniMax H3 的模型衍生品 —— [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3) 适用于这些权重。在重新分发或将其用于产品之前，请先阅读相关许可条款。这也包括上面链接的转换版和量化版权重。
+* 本**节点包**采用 Apache 2.0 许可（见 `LICENSE`）。
+* 该模型可以将人物身份替换进其未参与拍摄的视频中；身份来源于你提供的参考图片。请勿在未获得本人同意的情况下使用他人身份，并建议明确标注生成内容为 AI 生成内容（参见原始仓库的 intended-use 部分）。
 
 Viggle Chunked Sampler 也提供 live_progress，显示逐块采样、缓存复用和最终解码。保留 chunk_map 详细报告；该采样器仅支持内存缓存。
+
+## 问题反馈
+
+* Issues：[ComfyUI-Viggle-Animate-H3/issues](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3/issues)
