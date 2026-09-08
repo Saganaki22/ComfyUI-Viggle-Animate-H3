@@ -1,6 +1,7 @@
 import collections
 import copy
 import hashlib
+import inspect
 import logging
 import math
 import weakref
@@ -16,8 +17,24 @@ import comfy.samplers
 import comfy.sd
 import comfy.utils
 import latent_preview
+from comfy_execution.utils import get_executing_context
 from comfy_extras import nodes_minimax_h3 as core_h3
 from comfy_extras import nodes_custom_sampler as core_sampler
+
+def _same_stock_class(cls, stock):
+    return (cls is stock or (cls is not None and cls.__qualname__ == stock.__qualname__
+                            and inspect.getsourcefile(cls) == inspect.getsourcefile(stock)))
+
+
+def _send_progress(node_id, text):
+    from server import PromptServer
+    server = getattr(PromptServer, "instance", None)
+    context = get_executing_context()
+    if server is not None and server.client_id is not None and context is not None:
+        server.send_sync("viggle.chunk_progress", {
+            "node_id": node_id, "text": text, "prompt_id": context.prompt_id,
+        }, server.client_id)
+
 
 CANVAS_MULTIPLE = 32
 FPS = 24
@@ -474,7 +491,6 @@ class ViggleChunkedSampler:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "noise": ("NOISE", {"tooltip": "From a Noise node (e.g. RandomNoise). Its seed is offset per chunk: chunk i renders with seed + i."}),
             "guider": ("GUIDER", {"tooltip": "From BasicGuider / CFGGuider. Only its model, cfg and negative matter — the positive is replaced per chunk from the cond_set."}),
             "sampler": ("SAMPLER", {"tooltip": "From KSamplerSelect or RES4LYF — reused for every chunk."}),
             "sigmas": ("SIGMAS", {"tooltip": "The step schedule (BasicScheduler etc.) — every chunk runs the identical schedule."}),
@@ -486,7 +502,7 @@ class ViggleChunkedSampler:
                                        "tooltip": "1-based chunk number to change (0 = off). Set a new rerender_seed to regenerate it and the following chunks; earlier chunks reuse cache when available."}),
             "rerender_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                                       "tooltip": "Seed for the chunk selected by rerender_chunk. Type a new number for a new take."}),
-        }}
+        }, "hidden": {"dynprompt": "DYNPROMPT", "unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("frames", "chunk_map")
@@ -495,9 +511,10 @@ class ViggleChunkedSampler:
     DESCRIPTION = ("Chunked Viggle-Animate sampler: latent carry for continuity, "
                    "per-chunk cache and re-render.")
 
-    def sample(self, noise, guider, sampler, sigmas, cond_set, vae, seed,
-               rerender_chunk, rerender_seed):
+    def sample(self, guider, sampler, sigmas, cond_set, vae, seed,
+               rerender_chunk, rerender_seed, dynprompt=None, unique_id=None):
         _validate_sigmas(sigmas)
+        progress_node = dynprompt.get_display_node_id(unique_id) if dynprompt is not None else unique_id
         windows = cond_set["spans"]      # (a, b, lat0, latn)
         conds = cond_set["conds"]
         if len(windows) != len(conds) or not conds:
@@ -507,7 +524,8 @@ class ViggleChunkedSampler:
         total_lat = _frames_to_latents(total_f)
         total_a = round(total_f / FPS * 40)
         model = guider.model_patcher
-        owners = (model, noise, guider, sampler)
+        noise = core_sampler.Noise_RandomNoise(int(seed))
+        owners = (model, guider, sampler)
         sampling_key = self._sampling_key(noise, guider, sampler)
         dev = comfy.model_management.intermediate_device()
 
@@ -530,6 +548,8 @@ class ViggleChunkedSampler:
             key = self._chunk_key(prev_key, sampling_key, conds[i], seed_i, ch, cw,
                                   (a, b, lat0, latn, carry), sigmas)
             cached = _chunk_cache_get(key, owners)
+            _send_progress(progress_node, f"Chunk {i + 1} of {len(windows)}: frames {a}-{b}, seed {seed_i} — "
+                           + ("cached" if cached is not None else "sampling"))
             chunk_map[-1] += " [cached]" if cached is not None else " [rendered]"
             if cached is None:
                 out_v, out_a = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
@@ -545,9 +565,11 @@ class ViggleChunkedSampler:
             prev_key, prev_end = key, lat0 + latn
             pbar.update(1)
 
+        _send_progress(progress_node, "Decoding final video")
         frames = vae.decode(master_v)
         if frames.dim() == 5:  # combine batches
             frames = frames.reshape(-1, frames.shape[-3], frames.shape[-2], frames.shape[-1])
+        _send_progress(progress_node, "Completed — final video decoded; downstream saving may follow")
         return (frames, "\n".join(chunk_map))
 
     def _render_chunk(self, noise, guider, sampler, sigmas, cond, seed_i,
@@ -599,8 +621,8 @@ class ViggleChunkedSampler:
     def _sampling_key(self, noise, guider, sampler):
         # Only the stock implementations have a known state contract. Custom
         # objects still sample normally, but are not safe to reuse across runs.
-        if (type(noise) not in (core_sampler.Noise_RandomNoise, core_sampler.Noise_EmptyNoise)
-                or type(guider) not in (core_sampler.Guider_Basic, comfy.samplers.CFGGuider)
+        if (not any(_same_stock_class(type(noise), cls) for cls in (core_sampler.Noise_RandomNoise, core_sampler.Noise_EmptyNoise))
+                or not any(_same_stock_class(type(guider), cls) for cls in (core_sampler.Guider_Basic, comfy.samplers.CFGGuider))
                 or type(sampler) is not comfy.samplers.KSAMPLER):
             return None
         model = guider.model_patcher
@@ -610,7 +632,8 @@ class ViggleChunkedSampler:
                        for name, entries in guider.original_conds.items() if name != "positive"}
         sampling = model.get_model_object("model_sampling")
         h = hashlib.sha256()
-        state = (vars(noise), guider.cfg, other_conds, sampler.extra_options, sampler.inpaint_options,
+        noise_state = {k: v for k, v in vars(noise).items() if k != "seed"}
+        state = (type(noise).__name__, noise_state, guider.cfg, other_conds, sampler.extra_options, sampler.inpaint_options,
                  guider.model_options, vars(sampling), str(model.patches_uuid),
                  model.attachments, model.additional_models, model.callbacks, model.wrappers,
                  model.injections, model.hook_patches, model.weight_wrapper_patches)

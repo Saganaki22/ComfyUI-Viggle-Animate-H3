@@ -120,8 +120,9 @@ class ChainingTests(unittest.TestCase):
         self.model.model.model_sampling.set_parameters(shift=4, audio_shift=3)
         self.assertNotEqual(original, self.run_key())
         self.model.model.model_sampling.set_parameters(shift=3, audio_shift=3)
+        original = self.run_key()
         self.noise.seed = 10
-        self.assertNotEqual(original, self.run_key())
+        self.assertEqual(original, self.run_key())  # Per-chunk seed overrides this value.
 
     def test_negative_invalidation(self):
         self.guider = comfy.samplers.CFGGuider(self.model)
@@ -196,21 +197,44 @@ class ChainingTests(unittest.TestCase):
                 streams.append(output)
             return comfy.nested_tensor.NestedTensor(streams)
         def run(chunk=0, seed=0):
-            return self.node.sample(self.noise, self.guider, self.sampler, self.sigmas,
+            return self.node.sample(self.guider, self.sampler, self.sigmas,
                                     cond_set, DecodeVAE(), 10, chunk, seed)[0]
         with patch.object(core.Guider_Basic, "sample", fake_sample), \
              patch.object(comfy.sample, "fix_empty_latent_channels", lambda model, samples: samples), \
-             patch.object(viggle.latent_preview, "prepare_callback", lambda *args: None):
+             patch.object(viggle.latent_preview, "prepare_callback", lambda *args: None), \
+             patch.object(viggle, "_send_progress") as progress:
             cold = run()
             self.assertEqual(len(calls), 3)
+            texts = [call.args[1] for call in progress.call_args_list]
+            self.assertEqual(len(texts), 5)
+            self.assertTrue(all("sampling" in text for text in texts[:3]))
+            self.assertEqual(texts[3], "Decoding final video")
+            self.assertTrue(texts[4].startswith("Completed"))
+            progress.reset_mock()
             self.assertGreater(calls[1][1].abs().sum().item(), 0)
             self.assertTrue(torch.equal(cold, run()))
+            self.assertTrue(all("cached" in call.args[1] for call in progress.call_args_list[:3]))
             self.assertEqual(len(calls), 3)
             suffix_cached = run(2, 123)
             self.assertEqual([x[0] for x in calls], [10, 11, 12, 123, 12])
             viggle._CHUNK_CACHE.clear()
             suffix_fresh = run(2, 123)
             self.assertTrue(torch.equal(suffix_cached, suffix_fresh))
+
+    def test_comfy_core_alias_cache_and_suffix_rerender(self):
+        spec = importlib.util.spec_from_file_location("viggle_chaining_core_alias", core.__file__)
+        alias = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: alias}):
+            spec.loader.exec_module(alias)
+            self.noise = alias.Noise_RandomNoise(0)
+            self.guider = alias.Guider_Basic(self.model)
+            self.guider.set_conds(conditioning())
+            original = self.run_key()
+            self.assertIsNotNone(original)
+            self.noise.seed = 999
+            self.assertEqual(original, self.run_key())
+            with patch.object(sys.modules[__name__], "core", alias):
+                self.test_cold_cached_and_suffix_rerender_carry()
 
     def test_frame_schedule_coverage(self):
         for total in range(5, 1800, 17):
@@ -227,7 +251,7 @@ class ChainingTests(unittest.TestCase):
         for values in ([1, 0.89, 0.72, 0, 0], [1, float("nan"), 0],
                        [1, float("inf"), 0], [1, -0.1, 0]):
             with self.subTest(values=values), self.assertRaisesRegex(ValueError, "interpolate_to_steps to 3"):
-                self.node.sample(self.noise, self.guider, self.sampler, torch.tensor(values),
+                self.node.sample(self.guider, self.sampler, torch.tensor(values),
                                  {}, DecodeVAE(), 0, 0, 0)
         self.assertFalse(viggle._CHUNK_CACHE)
 
@@ -324,7 +348,7 @@ class ChainingTests(unittest.TestCase):
                  patch.object(comfy.sample, "fix_empty_latent_channels", lambda model, samples: samples), \
                  patch.object(viggle.latent_preview, "prepare_callback", lambda *args: None), \
                  self.assertRaisesRegex(RuntimeError, "frames 0-123 produced NaN/Inf"):
-                self.node.sample(self.noise, self.guider, self.sampler, self.sigmas,
+                self.node.sample(self.guider, self.sampler, self.sigmas,
                                  cond_set, DecodeVAE(), 10, 0, 0)
             self.assertEqual(sample.call_count, 1)
             self.assertFalse(viggle._CHUNK_CACHE)

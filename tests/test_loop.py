@@ -1,5 +1,6 @@
 """Executor-level and disk-layer checks for the chunk loop; run with the ComfyUI venv's Python."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -136,6 +137,7 @@ class LoopTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.out_dir = Path(self._tmp.name)
         self.record = []
+        self.progress = []
         self.model = make_model_patcher()
         TestModelLoader.model = self.model
         TestCondSet.cond_set, self.n_chunks = cond_set_fixture()
@@ -167,7 +169,7 @@ class LoopTests(unittest.TestCase):
             "8": {"class_type": "ViggleChunkLoopStart",
                   "inputs": {"cond_set": ["7", 0], "run_name": run_name, "resume": resume}},
             "9": {"class_type": "ViggleSampleChunk",
-                  "inputs": {"state": ["8", 1], "noise": ["6", 0], "guider": ["3", 0],
+                  "inputs": {"state": ["8", 1], "guider": ["3", 0],
                              "sampler": ["4", 0], "sigmas": ["5", 0], "seed": 42,
                              "rerender_chunk": rerender_chunk, "rerender_seed": rerender_seed}},
             "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 1], "vae": ["11", 0]}},
@@ -178,10 +180,13 @@ class LoopTests(unittest.TestCase):
 
     def execute(self, prompt):
         import execution
+        from server import PromptServer
         server = type("S", (), {"client_id": None, "send_sync": lambda *a, **k: None})()
         executor = execution.PromptExecutor(
             server, cache_args={"ram": 16.0, "ram_inactive": 16.0, "lru": 0})
-        with patch.object(comfy.model_management, "load_models_gpu", lambda *a, **k: None), \
+        progress_server = types.SimpleNamespace(client_id="test-client", send_sync=lambda *args: self.progress.append(args))
+        with patch.object(PromptServer, "instance", progress_server, create=True), \
+             patch.object(comfy.model_management, "load_models_gpu", lambda *a, **k: None), \
              patch.object(core.Guider_Basic, "sample", fake_sample_record(self.record)), \
              patch.object(comfy.sample, "fix_empty_latent_channels", lambda model, samples: samples), \
              patch.object(viggle.latent_preview, "prepare_callback", lambda *a, **k: None):
@@ -192,6 +197,36 @@ class LoopTests(unittest.TestCase):
         return self.out_dir / "viggle_chunks" / name
 
     # ---- executor-level ----
+
+    def test_live_progress_targets_original_node_through_all_iterations(self):
+        self.assertTrue(self.execute(self.prompt("progress")).success)
+        self.assertEqual(len(self.progress), self.n_chunks * 3)
+        for event, data, client in self.progress:
+            self.assertEqual(event, "viggle.chunk_progress")
+            self.assertEqual(data["node_id"], "9")
+            self.assertEqual(data["prompt_id"], "test-prompt")
+            self.assertEqual(client, "test-client")
+        for i in range(self.n_chunks):
+            texts = [e[1]["text"] for e in self.progress[i * 3:i * 3 + 3]]
+            self.assertIn(f"Chunk {i + 1} of {self.n_chunks}", texts[0])
+            self.assertTrue(texts[0].endswith("sampling"))
+            self.assertIn("checkpoint saved; decoding/saving", texts[1])
+            self.assertIn("loop completed" if i + 1 == self.n_chunks else "decode/save finished", texts[2])
+
+    def test_resume_progress_reports_restoring_without_sampling(self):
+        self.assertTrue(self.execute(self.prompt("resume_progress")).success)
+        self.progress.clear()
+        self.record.clear()
+        self.assertTrue(self.execute(self.prompt("resume_progress", resume=True)).success)
+        self.assertEqual([e[0] for e in self.record], ["decode"] * self.n_chunks)
+        self.assertEqual(len(self.progress), self.n_chunks * 3)
+        self.assertTrue(all(e[1]["text"].endswith("restoring") for e in self.progress[::3]))
+
+    def test_failed_decode_does_not_announce_loop_completion(self):
+        with patch.object(RecordingVAE, "decode", side_effect=RuntimeError("test decode failure")):
+            self.assertFalse(self.execute(self.prompt("failed_progress")).success)
+        self.assertEqual(len(self.progress), 2)
+        self.assertIn("checkpoint saved", self.progress[-1][1]["text"])
 
     def test_executor_runs_loop_with_decode_barrier_between_chunks(self):
         executor = self.execute(self.prompt("exec_run"))
@@ -222,6 +257,88 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(seeds, [999, 44])
         files = sorted(p.name for p in self.run_dir("rerun_run").glob("chunk_*.latent"))
         self.assertEqual(len(files), self.n_chunks + 2)  # old chunk 2 and 3 kept alongside the new ones
+
+    def test_stock_noise_seed_changes_do_not_resample(self):
+        prompt = self.prompt("noise_resume", resume=True)
+        prompt["6"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": 100}}
+        with patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, {"RandomNoise": core.RandomNoise}):
+            self.assertTrue(self.execute(prompt).success)
+            self.record.clear()
+            prompt["6"]["inputs"]["noise_seed"] = 200
+            self.assertTrue(self.execute(prompt).success)
+            self.assertEqual([e[0] for e in self.record], ["decode"] * self.n_chunks)
+
+    def test_comfy_loader_noise_alias_resumes_after_seed_change(self):
+        # Match load_custom_node's separate import of this core extras file.
+        spec = importlib.util.spec_from_file_location("viggle_test_core_alias", core.__file__)
+        alias = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: alias}):
+            spec.loader.exec_module(alias)
+            self.assertIsNot(alias.RandomNoise, core.RandomNoise)
+            prompt = self.prompt("alias_noise_resume", resume=True)
+            prompt["6"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": 100}}
+            with patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, {"RandomNoise": alias.RandomNoise}):
+                self.assertTrue(self.execute(prompt).success)
+                self.record.clear()
+                prompt["6"]["inputs"]["noise_seed"] = 200
+                self.assertTrue(self.execute(prompt).success)
+                self.assertEqual([e[0] for e in self.record], ["decode"] * self.n_chunks)
+
+    def test_linked_loader_file_replacement_changes_signature(self):
+        from comfy_execution.graph import DynamicPrompt
+        prompt = self.prompt("linked_loader")
+        prompt["1"]["inputs"]["unet_name"] = ["filename", 0]
+        prompt["filename"] = {"class_type": "PrimitiveString", "inputs": {"value": "weights.safetensors"}}
+        weights = self.out_dir / "weights.safetensors"
+        weights.write_bytes(b"old")
+        with patch.object(folder_paths, "get_filename_list", return_value=[weights.name]), \
+             patch.object(folder_paths, "get_full_path", return_value=str(weights)):
+            first = loop._sampling_graph_signature(DynamicPrompt(prompt), "9")
+            weights.write_bytes(b"replacement")
+            second = loop._sampling_graph_signature(DynamicPrompt(prompt), "9")
+            self.assertNotEqual(first, second)
+            prompt["1"]["inputs"]["unet_name"] = weights.name
+            first = loop._sampling_graph_signature(DynamicPrompt(prompt), "9")
+            weights.write_bytes(b"another replacement")
+            self.assertNotEqual(first, loop._sampling_graph_signature(DynamicPrompt(prompt), "9"))
+
+    def test_unconnected_noise_seed_does_not_change_signature(self):
+        from comfy_execution.graph import DynamicPrompt
+        prompt = self.prompt("custom_noise")
+        prompt["6"]["inputs"]["noise_seed"] = 100
+        first = loop._sampling_graph_signature(DynamicPrompt(prompt), "9")
+        prompt["6"]["inputs"]["noise_seed"] = 200
+        self.assertEqual(first, loop._sampling_graph_signature(DynamicPrompt(prompt), "9"))
+
+    def test_failed_resume_preview_preserves_completed_manifest(self):
+        self.assertTrue(self.execute(self.prompt("preview_failure")).success)
+        path = self.run_dir("preview_failure") / "manifest.json"
+        before = json.loads(path.read_text())
+        with patch.object(RecordingVAE, "decode", side_effect=RuntimeError("test decode failure")):
+            self.assertFalse(self.execute(self.prompt("preview_failure", resume=True)).success)
+        self.assertEqual(json.loads(path.read_text()), before)
+        loop.ViggleAssembleChunkLatents().assemble("preview_failure", 0)
+
+    def test_rerender_failure_manifest_keeps_only_matching_prefix(self):
+        self.assertTrue(self.execute(self.prompt("changed_prefix")).success)
+        original_decode = RecordingVAE.decode
+        calls = []
+
+        def fail_second(vae, pixels):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("test decode failure")
+            return original_decode(vae, pixels)
+
+        with patch.object(RecordingVAE, "decode", fail_second):
+            self.assertFalse(self.execute(self.prompt("changed_prefix", resume=True,
+                                                     rerender_chunk=2, rerender_seed=999)).success)
+        manifest = json.loads((self.run_dir("changed_prefix") / "manifest.json").read_text())
+        self.assertEqual([entry["seed"] for entry in manifest["entries"]], [42, 999])
+        self.record.clear()
+        self.assertTrue(self.execute(self.prompt("changed_prefix", resume=True,
+                                                rerender_chunk=2, rerender_seed=999)).success)
+        self.assertEqual([e[1] for e in self.record if e[0] == "sample"], [44])
 
     def test_assemble_full_partial_and_single_from_manifest(self):
         self.execute(self.prompt("assemble_run"))
@@ -317,7 +434,7 @@ class LoopTests(unittest.TestCase):
             "s": {"class_type": "ViggleChunkLoopStart", "inputs": {"cond_set": ["c", 0],
                                                                   "run_name": "expand_run", "resume": True}},
             "n": {"class_type": "ViggleSampleChunk",
-                  "inputs": {"state": ["s", 1], "noise": ["x", 0], "guider": ["x", 0],
+                  "inputs": {"state": ["s", 1], "guider": ["x", 0],
                              "sampler": ["x", 0], "sigmas": ["x", 0], "seed": 42,
                              "rerender_chunk": 0, "rerender_seed": 0}},
             "d": {"class_type": "VAEDecode", "inputs": {"samples": ["n", 1], "vae": ["x", 0]}},

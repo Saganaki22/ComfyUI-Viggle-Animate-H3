@@ -17,7 +17,9 @@ import nodes as comfy_nodes
 import comfy.model_management
 from comfy_execution.graph_utils import GraphBuilder, is_link
 
-from .nodes import FPS, ViggleChunkedSampler, _hash_cache_value, _validate_sigmas
+from comfy_extras import nodes_custom_sampler as core_sampler
+
+from .nodes import FPS, ViggleChunkedSampler, _hash_cache_value, _validate_sigmas, _send_progress
 
 CHECKPOINT_VERSION = 1
 
@@ -57,13 +59,16 @@ def _atomic_write(path, writer):
 def _sampling_graph_signature(dynprompt, unique_id):
     """Stable across node IDs/restarts; include loader file identity and node code."""
     memo = {}
+    linked_files = {}
     loader_inputs = {"unet_name": "diffusion_models", "lora_name": "loras",
                      "ckpt_name": "checkpoints", "vae_name": "vae"}
 
     def describe(node_id):
-        if node_id in memo:
-            return memo[node_id]
+        memo_key = node_id
+        if memo_key in memo:
+            return memo[memo_key]
         node = dynprompt.get_node(node_id)
+        cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(node["class_type"])
         inputs = {name: [describe(value[0]), value[1]] if is_link(value) else value
                   for name, value in sorted(node.get("inputs", {}).items())}
         files = []
@@ -74,19 +79,32 @@ def _sampling_graph_signature(dynprompt, unique_id):
                 if path is not None:
                     stat = os.stat(path)
                     files.append((str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns))
-        cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(node["class_type"])
+            elif is_link(value):
+                # The graph does not expose the evaluated filename. Track the
+                # category's file metadata conservatively, without loading weights
+                # or executing arbitrary filename-producing nodes ourselves.
+                if category not in linked_files:
+                    identities = []
+                    for filename in sorted(folder_paths.get_filename_list(category)):
+                        path = folder_paths.get_full_path(category, filename)
+                        if path is not None:
+                            stat = os.stat(path)
+                            identities.append((str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns))
+                    linked_files[category] = identities
+                files.append((category, linked_files[category]))
         source = inspect.getsourcefile(cls) if cls is not None else None
         code = hashlib.sha256(Path(source).read_bytes()).hexdigest() if source else None
         data = (node["class_type"], inputs, files, code)
         h = hashlib.sha256()
         if not _hash_cache_value(h, data):
             raise ValueError("Viggle: sampling graph contains runtime objects that cannot be recorded for resume.")
-        memo[node_id] = h.hexdigest()
-        return memo[node_id]
+        memo[memo_key] = h.hexdigest()
+        return memo[memo_key]
 
     node = dynprompt.get_node(unique_id)
-    roots = [node["inputs"][key] for key in ("noise", "guider", "sampler", "sigmas")]
+    roots = [node["inputs"][key] for key in ("guider", "sampler", "sigmas")]
     data = [(describe(value[0]), value[1]) for value in roots]
+    data += [hashlib.sha256(Path(inspect.getsourcefile(core_sampler.Noise_RandomNoise)).read_bytes()).hexdigest()]
     # Changes to our carry/serialization implementation invalidate saved sampling.
     data += [hashlib.sha256(Path(__file__).read_bytes()).hexdigest()]
     return hashlib.sha256(json.dumps(data).encode()).hexdigest()
@@ -148,16 +166,16 @@ class ViggleSampleChunk:
     def INPUT_TYPES(cls):
         inputs = ViggleChunkedSampler.INPUT_TYPES()["required"]
         return {"required": {"state": ("VIGGLE_LOOP_STATE",),
-                             **{name: inputs[name] for name in ("noise", "guider", "sampler", "sigmas", "seed", "rerender_chunk", "rerender_seed")}},
+                             **{name: inputs[name] for name in ("guider", "sampler", "sigmas", "seed", "rerender_chunk", "rerender_seed")}},
                 "hidden": {"dynprompt": "DYNPROMPT", "unique_id": "UNIQUE_ID"}}
 
-    RETURN_TYPES = ("VIGGLE_LOOP_STATE", "LATENT", "STRING", "STRING")
-    RETURN_NAMES = ("chunk", "video_latent", "filename_prefix", "status")
+    RETURN_TYPES = ("VIGGLE_LOOP_STATE", "LATENT", "STRING")
+    RETURN_NAMES = ("chunk", "video_latent", "filename_prefix")
     FUNCTION = "sample"
     CATEGORY = "sampling/viggle/experimental"
     DESCRIPTION = "Sample and checkpoint one chunk before external VAE decoding. Use between Viggle Chunk Loop Start and End."
 
-    def sample(self, state, noise, guider, sampler, sigmas, seed, rerender_chunk, rerender_seed,
+    def sample(self, state, guider, sampler, sigmas, seed, rerender_chunk, rerender_seed,
                dynprompt, unique_id):
         _validate_sigmas(sigmas)
         plan, i = state["plan"], state["index"]
@@ -179,6 +197,8 @@ class ViggleSampleChunk:
         restored = state["resume"] and path.exists()
         status = f"Chunk {i + 1} of {len(plan['spans'])}: frames {a}-{b}, seed {seed_i}"
         logging.info("[ViggleSampleChunk] %s [%s]", status, "restored" if restored else "sampling")
+        progress_node = dynprompt.get_display_node_id(unique_id)
+        _send_progress(progress_node, status + (" — restoring" if restored else " — sampling"))
         if restored:
             out_v, out_a = _read_checkpoint(directory, entry, plan["canvas"])
         else:
@@ -198,7 +218,7 @@ class ViggleSampleChunk:
                 if audio_overlap:
                     au[..., :audio_overlap] = previous["audio"][..., audio_offset:audio_offset + audio_overlap].to(dev)
             out_v, out_a = ViggleChunkedSampler()._sample_window(
-                noise, guider, sampler, sigmas, plan["conds"][i], seed_i,
+                core_sampler.Noise_RandomNoise(seed_i), guider, sampler, sigmas, plan["conds"][i], seed_i,
                 ch, cw, a, b, carry, v, au)
             out_v, out_a = out_v.detach().cpu().contiguous(), out_a.detach().cpu().contiguous()
             metadata = {"viggle": json.dumps({"version": CHECKPOINT_VERSION, "entry": entry, "canvas": list(plan["canvas"])})}
@@ -207,13 +227,23 @@ class ViggleSampleChunk:
         entries = state["entries"] + [entry]
         collection = {"version": CHECKPOINT_VERSION, "run_name": state["run_name"],
                       "canvas": list(plan["canvas"]), "total_frames": plan["total_frames"], "entries": entries}
-        _atomic_write(directory / "manifest.json", lambda temporary: Path(temporary).write_text(
-            json.dumps(collection, indent=2), encoding="utf-8"))
+        manifest = directory / "manifest.json"
+        saved_collection = collection
+        if restored and manifest.exists():
+            existing = json.loads(manifest.read_text(encoding="utf-8"))
+            if (all(existing.get(k) == collection[k] for k in ("version", "run_name", "canvas", "total_frames"))
+                    and existing.get("entries", [])[:len(entries)] == entries):
+                # Replaying previews must not hide the already completed suffix
+                # if decoding or saving fails before the loop reaches it again.
+                saved_collection = existing
+        _atomic_write(manifest, lambda temporary: Path(temporary).write_text(
+            json.dumps(saved_collection, indent=2), encoding="utf-8"))
         next_state = {**state, "index": i + 1, "entries": entries, "graph_signature": signature,
+                      "progress_node": progress_node,
                       "previous": {"span": entry["span"], "video": out_v, "audio": out_a}}
+        _send_progress(progress_node, status + (" — restored; decoding/saving" if restored else " — checkpoint saved; decoding/saving"))
         prefix = f"viggle_chunks/{state['run_name']}/preview_{i + 1:04}_{key[:8]}"
-        return (next_state, {"samples": out_v.clone()}, prefix,
-                status + (" [restored]" if restored else " [saved]"))
+        return (next_state, {"samples": out_v.clone()}, prefix)
 
 
 class ViggleChunkLoopEnd:
@@ -235,6 +265,11 @@ class ViggleChunkLoopEnd:
     def finish(self, loop, chunk, images, dynprompt, unique_id, after_save=None):
         if not torch.isfinite(images).all():
             raise ValueError("Viggle: decoded chunk contains NaN/Inf. Its latent checkpoint is already saved.")
+        if "progress_node" in chunk:
+            done = chunk["index"] == len(chunk["plan"]["spans"])
+            _send_progress(chunk["progress_node"],
+                           f"Chunk {chunk['index']} of {len(chunk['plan']['spans'])} — "
+                           + ("loop completed (final assembly/decode may follow)" if done else "decode/save finished"))
         if chunk["index"] == len(chunk["plan"]["spans"]):
             collection = {"version": CHECKPOINT_VERSION, "run_name": chunk["run_name"],
                           "canvas": list(chunk["plan"]["canvas"]),

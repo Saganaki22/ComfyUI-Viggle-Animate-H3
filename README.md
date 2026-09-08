@@ -19,9 +19,13 @@ hardware.
 
 ## New in 1.4.0
 
-Added experimental windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added custom sigma presets covering upstream-style **4–8 steps** (4, 6 or 8 sigma points), derived from the upstream shift-3 schedule. Choose the preset that fits your use case and speed budget; the longer schedules are experimental and do not guarantee better quality.
+Added windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added custom sigma presets covering upstream-style **4–8 steps** (4, 6 or 8 sigma points), derived from the upstream shift-3 schedule. Choose the preset that fits your use case and speed budget; the longer schedules are experimental and do not guarantee better quality.
 
 ## Nodes
+
+The node pack includes four loop nodes for disk checkpoints, external VAE
+decoding and live chunk progress. See [the long-generation guide](docs/long_video_guide.md)
+for wiring, recovery and a first-run checklist.
 
 | Node | What it does |
 |---|---|
@@ -29,10 +33,35 @@ Added experimental windowed conditioning and the **Viggle Chunked Sampler** for 
 | **Viggle-Animate Conditioning (H3)** | Builds conditioning + AV latent: video-first reference order, both references nested on the canvas short edge (the driving clip's, unless width/height are overridden) — the layout the finetune was trained with |
 | **Viggle-Animate Conditioning (H3, Windowed)** | Splits the driving clip into overlapping windows and builds each chunk's references; outputs `cond_set` for the chunked sampler and `guider_positive` for the guider |
 | **Viggle Chunked Sampler** | Samples each window, preserves overlap from the preceding chunk, reuses eligible cached chunks, and decodes the assembled video; outputs `frames` and a readable `chunk_map` |
+| **Viggle Chunk Loop Start** | Creates the run folder and starts the automatically sized chunk loop; leave `initial_state` disconnected |
+| **Viggle Sample Chunk** | Samples/checkpoints one chunk; outputs LATENT, loop state, save filename prefix; shows live progress |
+| **Viggle Chunk Loop End** | Waits for chunk decoding and any connected save dependency, then advances the loop |
+| **Viggle Assemble Chunk Latents** | Loads one saved chunk or assembles the matching chain for final VAE decoding; reports complete/partial status |
 
 Model loading and sampling controls use ComfyUI core: **Load Diffusion Model**, **Load LoRA (Model Only)**,
 **ModelSamplingMiniMaxH3** (video/audio shifts 3.0), **BasicGuider**, **KSamplerSelect** and **ManualSigmas**.
-KJNodes **CustomSigmas** can supply the same schedules below. The chunked sampler decodes internally; connect its `frames` directly to your video-saving node.
+KJNodes **CustomSigmas** can supply the same schedules below. **Viggle Chunked Sampler** decodes internally; connect its `frames` directly to your video-saving node. **Viggle Sample Chunk** outputs LATENT and needs an external VAE Decode.
+
+### Which workflow should I use?
+
+Download a JSON workflow or drag its PNG into ComfyUI:
+
+| Workflow | JSON | PNG |
+|---|---|---|
+| Single shot (v1.2.0) | [JSON](example_workflows/viggle-animate-h3_workflow-v1.2.0.json) | [PNG](example_workflows/viggle-animate-h3_workflow-v1.2.0.png) |
+| Chunked Sampler — memory cache, one final decode | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-sampler.png) |
+| Chunked Window Advanced — loop, disk checkpoints, external decode | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.png) |
+
+| Your goal | Use |
+|---|---|
+| One shot, typically 124 frames (~5.2 s at 24 fps) | Original **Viggle-Animate Conditioning (H3)** → core sampler → VAE Decode → save |
+| Longer clip with a compact workflow and one final decode | **Windowed Conditioning → Viggle Chunked Sampler**; reuse is memory-only |
+| Longer/expensive run, per-chunk previews, or recovery after cancellation/restart | **Windowed Conditioning → Start / Sample Chunk / End → Assemble → VAE Decode**; checkpoints are on disk |
+
+Use the loop workflow when losing a run would be costly, even for two chunks.
+You only place one Sample Chunk node: the plan determines how often it repeats.
+Start with **124-frame windows, 22-frame overlap, 24 fps** and the four-point
+sigma baseline below. [Long-generation setup and troubleshooting](docs/long_video_guide.md).
 
 | cond_vid | ref_img | output |
 |:---:|:---:|:---:|
@@ -58,6 +87,9 @@ KJNodes **CustomSigmas** can supply the same schedules below. The chunked sample
 cd ComfyUI/custom_nodes
 git clone https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3
 ```
+
+Restart
+ComfyUI and refresh the browser after updating to load the live-progress extension.
 
 ## Model Links
 
@@ -136,9 +168,9 @@ Paste one list into **ManualSigmas** or KJNodes **CustomSigmas**, then connect i
 
 Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The final `0.0` is required: it is the destination of the last update, not another model evaluation. Do not append another zero or shift these lists again. Use fewer updates for speed; compare the longer presets on your footage before choosing them for quality. Encoding and final decoding still take time regardless of the preset.
 
-## Experimental long clips (`exp`)
+## Long video generation
 
-Example workflow (Windowed Conditioning + Chunked Sampler): [example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_sampler_exp.json).
+Example workflow (Windowed Conditioning + Chunked Sampler): [example_workflows/viggle-animate-h3_workflow-chunked-sampler.json](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json).
 
 Connect **Viggle-Animate Conditioning (H3, Windowed)** to **Viggle Chunked Sampler**. Its `guider_positive` output supplies BasicGuider's conditioning (or CFGGuider's positive). Start with 124-frame chunks and 22-frame overlap. Prior output is preserved in each overlap, and the assembled latent is decoded once. Motion and appearance can still change at joins; use a repainted reference frame from the driving shot and keep the input/output at 24 fps.
 
@@ -148,7 +180,7 @@ Windowed conditioning reuses complete 17-frame encoder blocks from the preceding
 
 | Control | Meaning |
 |---|---|
-| `seed` | Base sampling seed: chunk 1 uses `seed`, chunk 2 uses `seed + 1`, and so on. The chunked sampler uses this value instead of the connected noise node's seed. |
+| `seed` | Base sampling seed: chunk 1 uses `seed`, chunk 2 uses `seed + 1`, and so on. Both Viggle samplers generate standard noise internally; remove old noise connections when updating a workflow. |
 | `rerender_chunk` | **1-based** chunk whose seed you want to override. **0 disables the override**. Choose a chunk number shown in `chunk_map`. |
 | `rerender_seed` | Replacement seed for the selected chunk only. It has no effect when `rerender_chunk = 0`; zero itself is a valid seed. |
 
@@ -160,16 +192,16 @@ Keep the same override to retain that take, or change `rerender_seed` for anothe
 
 - You cannot change one chunk and keep all later chunks fixed: the overlap is carried forward. Existing overlap from the preceding chunk stays pinned, so rerendering a chunk does not repaint its inherited beginning.
 - Reuse is an in-memory optimization, not a saved checkpoint or resume system. Restarting ComfyUI clears it. Cache eviction, changed inputs/model/sampling settings, or oversized entries can require earlier chunks to render again.
-- Stock noise and guider objects with inspectable sampler/model settings support reuse. Opaque custom options, callbacks or patches bypass caching and still sample normally; patched workflows may rerender every chunk.
+- Stock guider objects with inspectable sampler/model settings support reuse. Opaque custom options, callbacks or patches bypass caching and still sample normally; patched workflows may rerender every chunk.
 - Chunk caching preserves output precision and is limited to **2 GiB** of CPU tensor storage. Encoded references have a separate **256 MiB / 64-entry** limit. Oversized entries are not cached.
 - The assembled latent is decoded again after sampling, even when earlier chunks are reused. Full-clip conditioning, the master latent, final decoding and output frames still need memory; chunking does not make arbitrarily long clips fit in RAM/VRAM.
 - Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. The final window may overlap more than requested, and up to **16 trailing frames** are dropped to fit the `17k+5` frame grid.
 - Generated audio is discarded. Connect the driving clip's audio to the video-saving node and match it to the retained video length; use **24 fps** for input and output.
 - Invalid sigma schedules and NaN/Inf chunk latents now stop with an actionable error before corrupt output is cached or carried into later chunks.
 
-### Chunk loop nodes (experimental)
+### Chunk loop nodes
 
-Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/experimental_nodes.md](docs/experimental_nodes.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json](example_workflows/viggle-animate-h3_workflow_chunked_window_exp.json).
+Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/long_video_guide.md](docs/long_video_guide.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json).
 
 Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — no VAE input on the sampler, and a failure mid-run keeps every completed chunk:
 
@@ -190,7 +222,14 @@ Loop Start ─ loop ────────────────────
 - Checkpoints land in `output/viggle_chunks/<run_name>/` as safetensors plus a `manifest.json`; writes are atomic, so a crash never leaves a half-valid chunk.
 - With `resume` on, re-running the queue restores every chunk whose **graph, models, conditioning, sigmas and per-chunk seed** still match (the checkpoint filename embeds that fingerprint). Changed settings sample new files under new names; old takes stay on disk. `rerender_chunk` / `rerender_seed` work as in the single-pass sampler.
 - Decoding each chunk separately means each preview contains overlap context; run the collection through **Viggle Assemble Chunk Latents** → one final VAE Decode for the finished video.
-- A run killed mid-way leaves chunks 1…k−1 on disk and the manifest valid: re-queue with the same `run_name` and only the missing chunks sample.
+- A decode/save failure leaves that chunk's latent checkpoint on disk too. Re-queue with the same `run_name` and `resume` enabled to retry previews without resampling matching chunks. Replaying previews preserves an already completed manifest if a preview fails.
+- Sample Chunk generates standard noise internally from its seed; it has no noise input. Remove the old noise connection when updating a workflow. Linked model filenames are checked conservatively using file metadata across their model category; changing another file there can also invalidate reuse. Code updates invalidate automatic resume; old latent files remain readable.
+- Decode/save completes before the next chunk samples. ComfyUI's execution cache may retain decoded chunks in RAM (about 0.82 GiB per 124-frame 1024×576 float32 RGB chunk). Enable Video Combine's `save_output` for durable preview videos; latent checkpoints are saved independently.
+
+**Live loop progress:** Sample Chunk's read-only `live_progress` box updates for
+every chunk, including restored chunks. No extra node or wiring is needed. Restart
+ComfyUI and refresh the browser after updating. “Loop completed” excludes any
+downstream final assembly/decode/save; Start, End and Assemble retain their STRING status outputs.
 
 ## Limitations
 
@@ -232,3 +271,5 @@ If you use the model in published work, cite the original:
 ## Report Issue
 
 - issues: [ComfyUI-Viggle-Animate-H3/issues](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3/issues)
+
+Viggle Chunked Sampler also has a live_progress display for sampling, cache hits and final decoding. Its chunk_map output is retained; reuse is memory-only.
