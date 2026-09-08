@@ -68,7 +68,7 @@ def make_model_patcher():
     return comfy.model_patcher.ModelPatcher(module, torch.device("cpu"), torch.device("cpu"))
 
 
-def cond_set_fixture(total=75, chunk=39, overlap=22, canvas=(32, 32)):
+def cond_set_fixture(total=73, chunk=39, overlap=22, canvas=(32, 32)):
     spans = viggle.plan_spans(total, chunk, overlap)
     return {"spans": spans, "conds": [conditioning() for _ in spans],
             "total_frames": total, "canvas": canvas}, len(spans)
@@ -354,6 +354,57 @@ class LoopTests(unittest.TestCase):
         self.assertIn(f"frames {span[0]}-{span[1]}", status)
         with self.assertRaises(ValueError):
             node.assemble("assemble_run", self.n_chunks + 1, None)
+
+    def test_short_windows_decode_full_length_and_resume_rerender(self):
+        # Exercise the real H3 temporal decoder; only the learned spatial
+        # decoder is replaced. NaN-filled output detects any unwritten tail.
+        cls = viggle.comfy.ldm.minimax.vae.MiniMaxH3VideoVAE
+        vae = cls.__new__(cls)
+        torch.nn.Module.__init__(vae)
+        vae.clip_length, vae.token_drop = 17, 3
+        vae.vae_ratio_t, vae.vae_ratio = 4, 16
+        vae.frame_pre_padding, vae.tokens_chunk_size = 3, 5
+        vae.token_overlap, vae.frame_overlap = 2, 5
+        vae.decoder = types.SimpleNamespace(out_channels=3)
+        vae._finalize_pixels = lambda x: x
+        vae._adaptive_decode = lambda z: torch.ones(z.shape[0], 3, z.shape[2] * 4,
+                                                   z.shape[3] * 16, z.shape[4] * 16)
+        for frames in (5, 22, 39, 56, 73, 90, 107, 124, 141, 260, 345, 362):
+            with self.subTest(frames=frames):
+                TestCondSet.cond_set, self.n_chunks = cond_set_fixture(frames, 124, 22)
+                name = f"short_{frames}"
+                self.assertTrue(self.execute(self.prompt(name)).success)
+                assembled, status = loop.ViggleAssembleChunkLatents().assemble(name, 0)
+                self.assertTrue(status.startswith("Complete"))
+                latent = assembled['samples']
+                self.assertEqual(latent.shape[2], viggle._frames_to_latents(frames))
+                buffer = torch.full(vae.decode_output_shape(latent.shape), float('nan'))
+                decoded = vae.decode_temporal(latent, output_buffer=buffer)
+                self.assertEqual(decoded.shape[2], frames)
+                self.assertTrue(torch.isfinite(decoded).all())
+
+                # Check that separate loop windows assemble exactly like the
+                # single-pass sampler, including the shorter final carry.
+                capture = types.SimpleNamespace()
+                def capture_decode(value):
+                    capture.latent = value.clone()
+                    return torch.ones(1, 8, 8, 3)
+                capture.decode = capture_decode
+                with patch.object(core.Guider_Basic, "sample", fake_sample_record([])), \
+                     patch.object(comfy.sample, "fix_empty_latent_channels", lambda model, samples: samples), \
+                     patch.object(viggle.latent_preview, "prepare_callback", lambda *a, **k: None):
+                    guider = core.Guider_Basic(self.model)
+                    guider.set_conds(conditioning())
+                    viggle.ViggleChunkedSampler().sample(guider, comfy.samplers.ksampler('euler'),
+                        torch.tensor([1.0, 6 / 7, 0.6, 0.0]), TestCondSet.cond_set, capture, 42, 0, 0)
+                self.assertTrue(torch.equal(latent, capture.latent))
+                self.record.clear()
+                self.assertTrue(self.execute(self.prompt(name, resume=True)).success)
+                self.assertEqual([e[0] for e in self.record], ['decode'] * self.n_chunks)
+                self.record.clear()
+                self.assertTrue(self.execute(self.prompt(name, resume=True,
+                                                        rerender_chunk=self.n_chunks, rerender_seed=999)).success)
+                self.assertEqual([e[1] for e in self.record if e[0] == 'sample'], [999])
 
     def test_assemble_rejects_broken_chains_and_version(self):
         import json as jsonlib

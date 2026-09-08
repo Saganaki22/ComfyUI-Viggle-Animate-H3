@@ -10,13 +10,13 @@ ComfyUI nodes for **[Viggle-Animate](https://huggingface.co/Viggle/Viggle-Animat
 
 No text encoder, no prompt: conditioning is one frozen 362-token embedding computed once by the Viggle team with Qwen3-VL (`assets/fixed_prompt.txt`), identical for every render.
 
-The sampler is DMD2-distilled and works with very low step counts. **4–8 steps are recommended, with 6 steps being the sweet spot for speed vs. quality.** The included workflows also contain **manual sigma schedules derived from the upstream sampling formula**, allowing the distilled schedule to be reproduced directly with ComfyUI's existing **ManualSigmas** node.
+The sampler is DMD2-distilled and works with very low step counts. **The upstream baseline is 4 sigma points: 3 Euler updates.** The included workflows also contain **manual sigma schedules derived from the upstream sampling formula**, allowing the distilled schedule to be reproduced directly with ComfyUI's existing **ManualSigmas** node.
 
-A 4-step manual schedule contains **4 sigma points including the final `0.0`**, which means only **3 model forward passes** are performed. Likewise, 6 sigma points correspond to 5 forward passes, and 8 sigma points correspond to 7 forward passes.
+For these manual presets with Euler and BasicGuider / CFG 1.0, **4 sigma points = 3 sampling updates / model forward passes**, **6 points = 5**, and **8 points = 7**. The final `0.0` is included in the point count. For ComfyUI and the converted/quantized models, choose **4 points for speed, 6 for balance, or 8 for quality (may over-sharpen)**.
 
 ## New in 1.3.0
 
-Added windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added custom sigma presets covering upstream-style **4–8 steps** (4, 6 or 8 sigma points), derived from the upstream shift-3 schedule. Choose the preset that fits your use case and speed budget; the longer schedules are experimental and do not guarantee better quality.
+Added windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added **4-, 6- and 8-point custom sigma presets**, derived from the upstream shift-3 formula: **fast, balanced, and quality-focused (may over-sharpen)**, respectively.
 
 ## Nodes
 
@@ -47,7 +47,7 @@ Download a JSON workflow or drag its PNG into ComfyUI:
 |---|---|---|
 | Single shot (v1.2.0) | [JSON](example_workflows/viggle-animate-h3_workflow-v1.2.0.json) | [PNG](example_workflows/viggle-animate-h3_workflow-v1.2.0.png) |
 | Chunked Sampler — memory cache, one final decode | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-sampler.png) |
-| Chunked Window Advanced — loop, disk checkpoints, external decode | [JSON](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json) | [PNG](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.png) |
+| Long Video Advanced — loop, disk checkpoints, external decode | [JSON](example_workflows/viggle-animate-h3_workflow-long-video-advanced.json) | [PNG](example_workflows/viggle-animate-h3_workflow-long-video-advanced.png) |
 
 | Your goal | Use |
 |---|---|
@@ -130,9 +130,9 @@ ComfyUI and refresh the browser after updating to load the live-progress extensi
 ## Workflow Notes
 
 - Custom nodes required: [ComfyUI-Viggle-Animate-H3](https://github.com/Saganaki22/ComfyUI-Viggle-Animate-H3) (Viggle Animate Conditioning + Load Text Conditioning) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) (fast preview).
-- **Load Video**: use `force_rate = 24`. For single-shot conditioning, set `frame_load_cap` equal to `length` (e.g. 124). For windowed conditioning, load the desired full clip (`frame_load_cap = 0` in VHS loads all frames).
+- **Load Video**: use `force_rate = 24`. Single-shot `length` is a maximum: leave it at 124 and a 56-frame input automatically generates 56 frames. Off-grid inputs round up to the next `17k+5` length without discarding reference frames. For windowed conditioning, load the desired full clip (`frame_load_cap = 0` in VHS loads all frames).
 - Output resolution follows the driving video by default; set the conditioning node's `width`/`height` to override (each axis rounds to 32), or pre-scale the clip with **Scale Image to Total Pixels**. Tested canvas range: **0.4–1.2 MP** — 1.2 MP holds up reliably, but the driving video and reference image then need to be high quality, not pixelated.
-- Recommended sampling range is **4–8 steps**, with **6 steps** as the best speed/quality balance.
+- Choose **4 points / 3 updates for speed**, **6 points / 5 updates for balance**, or **8 points / 7 updates for quality (may over-sharpen)**. Compare results with your chosen ComfyUI model and quantization.
 - Tested samplers/schedulers include `euler`, `er_sde`, `exp_heun_2_x0`, `lcm` / `simple`, `normal`, `beta`, and `bong_tangent`, with CFG `1.0` and **ModelSamplingMiniMaxH3** shift `3.0`.
 - The included workflows carry both ordinary scheduler configurations and the manual sigma schedules derived from the upstream formula (built in via KJNodes **CustomSigmas**).
 - **Upstream sampling baseline:** use **ManualSigmas** with `1.0, 0.8571428571428571, 0.6, 0.0`, **euler**, **BasicGuider** (or CFG 1.0), and the original `viggle_animate_dmd_lora.safetensors` at strength 1.0. Connect ManualSigmas to SamplerCustomAdvanced's or Viggle Chunked Sampler's `sigmas` input. These are four sigma points and **three model evaluations**, matching upstream's “4 steps.” Keep **ModelSamplingMiniMaxH3** at video **3.0**, audio **3.0**; it does not shift the supplied ManualSigmas tensor again. Do not add a separate sigma-transform node afterward.
@@ -140,7 +140,7 @@ ComfyUI and refresh the browser after updating to load the live-progress extensi
 - **KJNodes CustomSigmas:** for the four values above, set `interpolate_to_steps` to **3**. Setting it to 4 interpolates through `log(0)` and produces a schedule ending in `0, 0`; Euler returns NaNs, which turn the final video black and contaminate subsequent chunks. The chunked sampler rejects this invalid schedule before rendering.
 - Stacks with **Comfy Kitchen** and **block sparse attention** patches.
 
-## Custom sigma presets (4–8 upstream-style steps)
+## Custom sigma presets (4, 6 or 8 points)
 
 Paste one list into **ManualSigmas** or KJNodes **CustomSigmas**, then connect its `SIGMAS` output to the sampler. These presets use `sigma = 3*t / (1 + 2*t)` with evenly spaced `t` from 1 to 0. The four-point preset matches the upstream baseline; the six- and eight-point presets extend the same pattern.
 
@@ -150,25 +150,25 @@ Paste one list into **ManualSigmas** or KJNodes **CustomSigmas**, then connect i
 | **Viggle — 5 Steps (6 Sigma Points)** | 6 | **5** |
 | **Viggle — 7 Steps (8 Sigma Points)** | 8 | **7** |
 
-**4 points — fastest baseline:**
+**4 points / 3 Euler updates — fast:**
 
 ```text
 1.0, 0.8571428571428571, 0.6, 0.0
 ```
 
-**6 points — recommended speed/quality balance:**
+**6 points / 5 Euler updates — balanced:**
 
 ```text
 1.0, 0.9230769230769231, 0.8181818181818182, 0.6666666666666666, 0.42857142857142855, 0.0
 ```
 
-**8 points — more sampling updates, favoring quality/stability:**
+**8 points / 7 Euler updates — quality (may over-sharpen):**
 
 ```text
 1.0, 0.9473684210526315, 0.8823529411764706, 0.8, 0.6923076923076923, 0.5454545454545454, 0.3333333333333333, 0.0
 ```
 
-Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The final `0.0` is required: it is the destination of the last update, not another model evaluation. Do not append another zero or shift these lists again. For most renders, start with **6 points**: 4 for maximum speed, 8 when you want to favor quality and stability. Encoding and final decoding still take time regardless of the preset.
+Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The final `0.0` is required: it is the destination of the last update, not another model evaluation. Do not append another zero or shift these lists again. Choose **4 points for speed, 6 for balance, or 8 for quality (may over-sharpen)**. These are practical ComfyUI preset choices; results depend on the clip and model/quantization. Encoding and final decoding still take time regardless of the preset.
 
 ## Long video generation
 
@@ -197,13 +197,20 @@ Keep the same override to retain that take, or change `rerender_seed` for anothe
 - Stock guider objects with inspectable sampler/model settings support reuse. Opaque custom options, callbacks or patches bypass caching and still sample normally; patched workflows may rerender every chunk.
 - Chunk caching preserves output precision and is limited to **2 GiB** of CPU tensor storage. Encoded references have a separate **256 MiB / 64-entry** limit. Oversized entries are not cached.
 - The assembled latent is decoded again after sampling, even when earlier chunks are reused. Full-clip conditioning, the master latent, final decoding and output frames still need memory; chunking does not make arbitrarily long clips fit in RAM/VRAM.
-- Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. The final window may overlap more than requested, and up to **16 trailing frames** are dropped to fit the `17k+5` frame grid.
+- Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. `chunk_frames` is the maximum window length: the last window can be shorter while keeping the normal overlap. All loaded reference frames are used; off-grid lengths generate up to **16 extra frames** to reach the next `17k+5` boundary (minimum 5). Output frames are sampled, not appended copies.
+
+With 362 input frames, `chunk_frames = 124` and `overlap_frames = 22`, the windows
+are **0–123, 102–225, 204–327, 306–361**; the final window renders **56 frames**.
+A 361-frame input also targets 362 generated frames rather than dropping to 345.
+The H3 VAE still applies its own internal temporal padding when encoding references;
+this does not duplicate the rendered output. Frame counts refer to the actual images
+received from the loader, which may differ from source-video metadata after FPS conversion.
 - Generated audio is discarded. Connect the driving clip's audio to the video-saving node and match it to the retained video length; use **24 fps** for input and output.
 - Invalid sigma schedules and NaN/Inf chunk latents now stop with an actionable error before corrupt output is cached or carried into later chunks.
 
 ### Chunk loop nodes
 
-Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/long_video_guide.md](docs/long_video_guide.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json](example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json).
+Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/long_video_guide.md](docs/long_video_guide.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow-long-video-advanced.json](example_workflows/viggle-animate-h3_workflow-long-video-advanced.json).
 
 Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — no VAE input on the sampler, and a failure mid-run keeps every completed chunk:
 
@@ -223,6 +230,7 @@ Loop Start ─ loop ────────────────────
 - **The decode/save branch must feed Loop End** — connect VAE Decode's images to `images` and Video Combine's `filenames` output to `after_save`, so a chunk cannot start before the previous one is decoded and saved. (Core SaveWEBM also works: its `images` output goes straight into `images`.)
 - Checkpoints land in `output/viggle_chunks/<run_name>/` as safetensors plus a `manifest.json`; writes are atomic, so a crash never leaves a half-valid chunk.
 - With `resume` on, re-running the queue restores every chunk whose **graph, models, conditioning, sigmas and per-chunk seed** still match (the checkpoint filename embeds that fingerprint). Changed settings sample new files under new names; old takes stay on disk. `rerender_chunk` / `rerender_seed` work as in the single-pass sampler.
+- In the Long Video Advanced example, change Sample Chunk's seed control from `randomize` to **`fixed`** before testing resume. Enable **`save_output`** on both chunk and final Video Combine nodes to keep the videos; the example defaults to temporary previews.
 - Decoding each chunk separately means each preview contains overlap context; run the collection through **Viggle Assemble Chunk Latents** → one final VAE Decode for the finished video.
 - A decode/save failure leaves that chunk's latent checkpoint on disk too. Re-queue with the same `run_name` and `resume` enabled to retry previews without resampling matching chunks. Replaying previews preserves an already completed manifest if a preview fails.
 - Sample Chunk generates standard noise internally from its seed; it has no noise input. Remove the old noise connection when updating a workflow. Linked model filenames are checked conservatively using file metadata across their model category; changing another file there can also invalidate reuse. Code updates invalidate automatic resume; old latent files remain readable.

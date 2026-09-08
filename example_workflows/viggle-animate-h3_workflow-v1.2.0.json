@@ -1,8 +1,8 @@
 {
   "id": "170d56f8-bc6c-4869-969a-b60d1f496563",
   "revision": 0,
-  "last_node_id": 45,
-  "last_link_id": 52,
+  "last_node_id": 46,
+  "last_link_id": 55,
   "nodes": [
     {
       "id": 2,
@@ -66,7 +66,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 42
+          "link": 54
         }
       ],
       "outputs": [
@@ -339,10 +339,10 @@
       ],
       "outputs": [
         {
-          "name": "MODEL",
+          "name": "model",
           "type": "MODEL",
           "links": [
-            41
+            53
           ]
         }
       ],
@@ -366,71 +366,6 @@
       "bgcolor": "#3f5159"
     },
     {
-      "id": 31,
-      "type": "BlockSparseAttention",
-      "pos": [
-        391.28195836679083,
-        -2887.943918611133
-      ],
-      "size": [
-        270,
-        250
-      ],
-      "flags": {},
-      "order": 21,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 41
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            42
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "BlockSparseAttention",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "Sol-Attn (adaptive tau)",
-        1.3,
-        0.2,
-        1,
-        "",
-        12288,
-        256,
-        "exact_kv_and_rows",
-        false
-      ],
-      "widgets_values_named": {
-        "selection": "Sol-Attn (adaptive tau)",
-        "selection.tau": 1.3,
-        "start_percent": 0.2,
-        "end_percent": 1,
-        "dense_blocks": "",
-        "min_tokens": 12288,
-        "extra_tokens": 256,
-        "sink_conditioning": "exact_kv_and_rows",
-        "verbose": false
-      },
-      "color": "#2a363b",
-      "bgcolor": "#3f5159"
-    },
-    {
       "id": 21,
       "type": "VHS_VideoCombine",
       "pos": [
@@ -439,7 +374,7 @@
       ],
       "size": [
         406.82081814712774,
-        1035.6814544837825
+        1018.4894181216881
       ],
       "flags": {},
       "order": 27,
@@ -501,13 +436,13 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "00000_00082-audio.mp4",
+            "filename": "00000_00103-audio.mp4",
             "subfolder": "video\\viggle-h3",
             "type": "output",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "00000_00082.png",
-            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\output\\video\\viggle-h3\\00000_00082-audio.mp4"
+            "workflow": "00000_00103.png",
+            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\output\\video\\viggle-h3\\00000_00103-audio.mp4"
           }
         }
       },
@@ -526,81 +461,18 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "00000_00082-audio.mp4",
+            "filename": "00000_00103-audio.mp4",
             "subfolder": "video\\viggle-h3",
             "type": "output",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "00000_00082.png",
-            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\output\\video\\viggle-h3\\00000_00082-audio.mp4"
+            "workflow": "00000_00103.png",
+            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\output\\video\\viggle-h3\\00000_00103-audio.mp4"
           }
         }
       },
       "color": "#222",
       "bgcolor": "#000"
-    },
-    {
-      "id": 26,
-      "type": "JWImageResizeToMegapixels",
-      "pos": [
-        50.95463727284162,
-        -2140.7519682085845
-      ],
-      "size": [
-        284.1080078125,
-        146
-      ],
-      "flags": {},
-      "order": 14,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 30
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            33
-          ]
-        },
-        {
-          "name": "WIDTH",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "HEIGHT",
-          "type": "INT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-various",
-        "ver": "ddf36c68c5fd6715b35b5c8c9b63e2eef8043bad",
-        "Node name for S&R": "JWImageResizeToMegapixels",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        0.6,
-        32,
-        "nearest"
-      ],
-      "widgets_values_named": {
-        "megapixels": 0.6,
-        "divisible_by": 32,
-        "interpolation_mode": "nearest"
-      },
-      "color": "#232",
-      "bgcolor": "#353"
     },
     {
       "id": 30,
@@ -611,7 +483,7 @@
       ],
       "size": [
         406.82081814712774,
-        691.8407272418913
+        687.4883129730067
       ],
       "flags": {},
       "order": 29,
@@ -673,13 +545,13 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "00000_00003.mp4",
+            "filename": "00000_00002.mp4",
             "subfolder": "video\\viggle-h3",
             "type": "temp",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "00000_00003.png",
-            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\temp\\video\\viggle-h3\\00000_00003.mp4"
+            "workflow": "00000_00002.png",
+            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\temp\\video\\viggle-h3\\00000_00002.mp4"
           }
         }
       },
@@ -698,13 +570,13 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "00000_00003.mp4",
+            "filename": "00000_00002.mp4",
             "subfolder": "video\\viggle-h3",
             "type": "temp",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "00000_00003.png",
-            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\temp\\video\\viggle-h3\\00000_00003.mp4"
+            "workflow": "00000_00002.png",
+            "fullpath": "C:\\Users\\drbaph\\Documents\\ComfyUI\\temp\\video\\viggle-h3\\00000_00002.mp4"
           }
         }
       },
@@ -800,56 +672,6 @@
       "bgcolor": "#653"
     },
     {
-      "id": 5,
-      "type": "LoadImage",
-      "pos": [
-        -374.92924240192167,
-        -2662.0342988945094
-      ],
-      "size": [
-        391.65055017393775,
-        715.1963469803704
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            4
-          ]
-        },
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "LoadImage",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "anthropomorphic_pug_portrait.jpg",
-        "image"
-      ],
-      "widgets_values_named": {
-        "image": "anthropomorphic_pug_portrait.jpg",
-        "upload": "image"
-      },
-      "color": "#323",
-      "bgcolor": "#535"
-    },
-    {
       "id": 29,
       "type": "ImageConcanate",
       "pos": [
@@ -904,125 +726,6 @@
       }
     },
     {
-      "id": 3,
-      "type": "VHS_LoadVideo",
-      "pos": [
-        -645.9905214961124,
-        -2689.6077129737923
-      ],
-      "size": [
-        255.8291015625,
-        736.575753052017
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "meta_batch",
-          "shape": 7,
-          "type": "VHS_BatchManager",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            30,
-            39
-          ]
-        },
-        {
-          "name": "frame_count",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": [
-            46
-          ]
-        },
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
-        "Node name for S&R": "VHS_LoadVideo",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {
-        "video": "ssstik.io_@01just_ai_1788729416126.mp4",
-        "force_rate": 24,
-        "custom_width": 0,
-        "custom_height": 0,
-        "frame_load_cap": 124,
-        "skip_first_frames": 60,
-        "select_every_nth": 1,
-        "format": "AnimateDiff",
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "ssstik.io_@01just_ai_1788729416126.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 24,
-            "custom_width": 0,
-            "custom_height": 0,
-            "frame_load_cap": 124,
-            "skip_first_frames": 60,
-            "select_every_nth": 1
-          }
-        }
-      },
-      "widgets_values_named": {
-        "video": "ssstik.io_@01just_ai_1788729416126.mp4",
-        "force_rate": 24,
-        "custom_width": 0,
-        "custom_height": 0,
-        "frame_load_cap": 124,
-        "skip_first_frames": 60,
-        "select_every_nth": 1,
-        "format": "AnimateDiff",
-        "choose video to upload": null,
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "ssstik.io_@01just_ai_1788729416126.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 24,
-            "custom_width": 0,
-            "custom_height": 0,
-            "frame_load_cap": 124,
-            "skip_first_frames": 60,
-            "select_every_nth": 1
-          }
-        }
-      },
-      "color": "#323",
-      "bgcolor": "#535"
-    },
-    {
       "id": 44,
       "type": "Reroute",
       "pos": [
@@ -1034,7 +737,7 @@
         26
       ],
       "flags": {},
-      "order": 16,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -1052,7 +755,12 @@
       ],
       "properties": {
         "showOutputText": false,
-        "horizontal": false
+        "horizontal": false,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -1069,7 +777,7 @@
         26
       ],
       "flags": {},
-      "order": 17,
+      "order": 16,
       "mode": 0,
       "inputs": [
         {
@@ -1082,14 +790,17 @@
         {
           "name": "",
           "type": "SIGMAS",
-          "links": [
-            52
-          ]
+          "links": []
         }
       ],
       "properties": {
         "showOutputText": false,
-        "horizontal": false
+        "horizontal": false,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -1106,7 +817,7 @@
         26
       ],
       "flags": {},
-      "order": 15,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -1124,7 +835,12 @@
       ],
       "properties": {
         "showOutputText": false,
-        "horizontal": false
+        "horizontal": false,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -1162,7 +878,7 @@
         {
           "name": "sigmas",
           "type": "SIGMAS",
-          "link": 52
+          "link": 55
         },
         {
           "name": "latent_image",
@@ -1209,7 +925,7 @@
         82
       ],
       "flags": {},
-      "order": 6,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1254,7 +970,7 @@
         712.1875465693884
       ],
       "flags": {},
-      "order": 7,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -1286,7 +1002,7 @@
         106
       ],
       "flags": {},
-      "order": 8,
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
@@ -1305,14 +1021,14 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "BasicScheduler",
         "ue_properties": {
           "widget_ue_connectable": {},
           "input_ue_unconnectable": {},
           "version": "7.8"
-        },
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "BasicScheduler"
+        }
       },
       "widgets_values": [
         "bong_tangent",
@@ -1341,7 +1057,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 9,
+      "order": 7,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1355,14 +1071,14 @@
       ],
       "title": "Custom Sigma 8 step",
       "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "1.5.0",
+        "Node name for S&R": "CustomSigmas",
         "ue_properties": {
           "widget_ue_connectable": {},
           "input_ue_unconnectable": {},
           "version": "7.8"
-        },
-        "cnr_id": "comfyui-kjnodes",
-        "ver": "1.5.0",
-        "Node name for S&R": "CustomSigmas"
+        }
       },
       "widgets_values": [
         "1.0, 0.9473684210526315, 0.8823529411764706, 0.8, 0.6923076923076923, 0.5454545454545454, 0.3333333333333333, 0.0",
@@ -1389,7 +1105,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 10,
+      "order": 8,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1403,14 +1119,14 @@
       ],
       "title": "Custom Sigma 6 step",
       "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "1.5.0",
+        "Node name for S&R": "CustomSigmas",
         "ue_properties": {
           "widget_ue_connectable": {},
           "input_ue_unconnectable": {},
           "version": "7.8"
-        },
-        "cnr_id": "comfyui-kjnodes",
-        "ver": "1.5.0",
-        "Node name for S&R": "CustomSigmas"
+        }
       },
       "widgets_values": [
         "1.0, 0.9230769230769231, 0.8181818181818182, 0.6666666666666666, 0.42857142857142855, 0.0",
@@ -1419,118 +1135,6 @@
       "widgets_values_named": {
         "sigmas_string": "1.0, 0.9230769230769231, 0.8181818181818182, 0.6666666666666666, 0.42857142857142855, 0.0",
         "interpolate_to_steps": 5
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 45,
-      "type": "MarkdownNote",
-      "pos": [
-        1043.6639477836984,
-        -1638.0611696659844
-      ],
-      "size": [
-        451.02462568572264,
-        273.7768998857491
-      ],
-      "flags": {
-        "pinned": true
-      },
-      "order": 11,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "Sigmas",
-      "properties": {},
-      "widgets_values": [
-        "## for basic scheduler use 6-8 steps <br>\n## simple / beta / normal / bong_tangent <br>\n## for manual sigmas 3 forwards = 4 steps (including 0.0) <br> 5 = 6 steps <br> 7 = 8 steps <br>\n## Sigmas derived from upstream formula"
-      ],
-      "widgets_values_named": {
-        "text": "## for basic scheduler use 6-8 steps <br>\n## simple / beta / normal / bong_tangent <br>\n## for manual sigmas 3 forwards = 4 steps (including 0.0) <br> 5 = 6 steps <br> 7 = 8 steps <br>\n## Sigmas derived from upstream formula"
-      },
-      "color": "#222",
-      "bgcolor": "#000"
-    },
-    {
-      "id": 40,
-      "type": "CustomSigmas",
-      "pos": [
-        590.2046169298292,
-        -1456.1715182579453
-      ],
-      "size": [
-        327.665625,
-        112
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 12,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SIGMAS",
-          "type": "SIGMAS",
-          "links": [
-            49
-          ]
-        }
-      ],
-      "title": "Custom Sigma 4 steps (Upstream)",
-      "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        },
-        "cnr_id": "comfyui-kjnodes",
-        "ver": "1.5.0",
-        "Node name for S&R": "CustomSigmas"
-      },
-      "widgets_values": [
-        "1.0, 0.8571428571428571, 0.6, 0.0",
-        3
-      ],
-      "widgets_values_named": {
-        "sigmas_string": "1.0, 0.8571428571428571, 0.6, 0.0",
-        "interpolate_to_steps": 3
-      },
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 39,
-      "type": "Reroute",
-      "pos": [
-        932.0227777288271,
-        -1482.6135524949073
-      ],
-      "size": [
-        75,
-        26
-      ],
-      "flags": {},
-      "order": 18,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "",
-          "type": "*",
-          "link": 49
-        }
-      ],
-      "outputs": [
-        {
-          "name": "",
-          "type": "SIGMAS",
-          "links": null
-        }
-      ],
-      "properties": {
-        "showOutputText": false,
-        "horizontal": false
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -1652,6 +1256,428 @@
       },
       "color": "#432",
       "bgcolor": "#653"
+    },
+    {
+      "id": 5,
+      "type": "LoadImage",
+      "pos": [
+        -374.92924240192167,
+        -2662.0342988945094
+      ],
+      "size": [
+        391.65055017393775,
+        715.1963469803704
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "LoadImage",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "ChatGPT Image Sep 8, 2026, 03_31_58 AM.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "ChatGPT Image Sep 8, 2026, 03_31_58 AM.png",
+        "upload": "image"
+      },
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 46,
+      "type": "BlockSparseAttention",
+      "pos": [
+        391.3556204388239,
+        -2898.635430218198
+      ],
+      "size": [
+        270,
+        250
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 53
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            54
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "BlockSparseAttention",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "sol-attn",
+        1.3,
+        0.2,
+        1,
+        "",
+        12288,
+        256,
+        "exact_kv_and_rows",
+        false
+      ],
+      "widgets_values_named": {
+        "selection": "sol-attn",
+        "selection.tau": 1.3,
+        "start_percent": 0.2,
+        "end_percent": 1,
+        "dense_blocks": "",
+        "min_tokens": 12288,
+        "extra_tokens": 256,
+        "sink_conditioning": "exact_kv_and_rows",
+        "verbose": false
+      },
+      "color": "#2a363b",
+      "bgcolor": "#3f5159"
+    },
+    {
+      "id": 26,
+      "type": "JWImageResizeToMegapixels",
+      "pos": [
+        50.95463727284162,
+        -2140.7519682085845
+      ],
+      "size": [
+        284.1080078125,
+        146
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 30
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            33
+          ]
+        },
+        {
+          "name": "WIDTH",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "HEIGHT",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-various",
+        "ver": "ddf36c68c5fd6715b35b5c8c9b63e2eef8043bad",
+        "Node name for S&R": "JWImageResizeToMegapixels",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        0.4,
+        32,
+        "nearest"
+      ],
+      "widgets_values_named": {
+        "megapixels": 0.4,
+        "divisible_by": 32,
+        "interpolation_mode": "nearest"
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 3,
+      "type": "VHS_LoadVideo",
+      "pos": [
+        -645.9905214961124,
+        -2689.6077129737923
+      ],
+      "size": [
+        255.8291015625,
+        743.5855352640658
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            30,
+            39
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            46
+          ]
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
+        "Node name for S&R": "VHS_LoadVideo",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": {
+        "video": "ssstik.io_@funsizedreeee_1788834249891 (1).mp4",
+        "force_rate": 24,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 362,
+        "skip_first_frames": 20,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "ssstik.io_@funsizedreeee_1788834249891 (1).mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 24,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 362,
+            "skip_first_frames": 20,
+            "select_every_nth": 1
+          }
+        }
+      },
+      "widgets_values_named": {
+        "video": "ssstik.io_@funsizedreeee_1788834249891 (1).mp4",
+        "force_rate": 24,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 362,
+        "skip_first_frames": 20,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "choose video to upload": null,
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "ssstik.io_@funsizedreeee_1788834249891 (1).mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 24,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 362,
+            "skip_first_frames": 20,
+            "select_every_nth": 1
+          }
+        }
+      },
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 39,
+      "type": "Reroute",
+      "pos": [
+        932.0227777288271,
+        -1482.6135524949073
+      ],
+      "size": [
+        75,
+        26
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "",
+          "type": "*",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "SIGMAS",
+          "links": [
+            55
+          ]
+        }
+      ],
+      "properties": {
+        "showOutputText": false,
+        "horizontal": false,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 45,
+      "type": "MarkdownNote",
+      "pos": [
+        1043.6639477836984,
+        -1638.0611696659844
+      ],
+      "size": [
+        451.02462568572264,
+        273.7768998857491
+      ],
+      "flags": {
+        "pinned": true
+      },
+      "order": 11,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Sigmas",
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "## for basic scheduler use 6-8 steps simple / beta / normal / bong_tangent <br>\n## for manual sigmas 3 forwards = 4 points (including 0.0) <br> 5 = 6 points <br> 7 = 8 points <br>\n## Sigmas derived from upstream formula"
+      ],
+      "widgets_values_named": {
+        "text": "## for basic scheduler use 6-8 steps simple / beta / normal / bong_tangent <br>\n## for manual sigmas 3 forwards = 4 points (including 0.0) <br> 5 = 6 points <br> 7 = 8 points <br>\n## Sigmas derived from upstream formula"
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 40,
+      "type": "CustomSigmas",
+      "pos": [
+        590.2046169298292,
+        -1456.1715182579453
+      ],
+      "size": [
+        327.665625,
+        112
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            49
+          ]
+        }
+      ],
+      "title": "Custom Sigma 4 steps (Upstream)",
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "1.5.0",
+        "Node name for S&R": "CustomSigmas",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "1.0, 0.8571428571428571, 0.6, 0.0",
+        3
+      ],
+      "widgets_values_named": {
+        "sigmas_string": "1.0, 0.8571428571428571, 0.6, 0.0",
+        "interpolate_to_steps": 3
+      },
+      "color": "#232",
+      "bgcolor": "#353"
     }
   ],
   "links": [
@@ -1816,22 +1842,6 @@
       "IMAGE"
     ],
     [
-      41,
-      22,
-      0,
-      31,
-      0,
-      "MODEL"
-    ],
-    [
-      42,
-      31,
-      0,
-      14,
-      0,
-      "MODEL"
-    ],
-    [
       46,
       3,
       2,
@@ -1872,8 +1882,24 @@
       "SIGMAS"
     ],
     [
-      52,
-      42,
+      53,
+      22,
+      0,
+      46,
+      0,
+      "MODEL"
+    ],
+    [
+      54,
+      46,
+      0,
+      14,
+      0,
+      "MODEL"
+    ],
+    [
+      55,
+      39,
       0,
       12,
       3,
@@ -1922,14 +1948,14 @@
   "extra": {
     "ue_links": [],
     "ds": {
-      "scale": 0.3719008264462857,
+      "scale": 0.5989500000000016,
       "offset": [
-        2464.8787802890724,
-        3743.94675942291
+        1419.6547444833773,
+        3098.931272966233
       ]
     },
     "links_added_by_ue": [],
-    "frontendVersion": "1.51.9",
+    "frontendVersion": "1.51.10",
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,

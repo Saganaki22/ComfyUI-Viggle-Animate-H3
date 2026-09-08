@@ -12,7 +12,7 @@
 | 长片段，接线简单，只在最后解码 | Windowed Conditioning → Chunked Sampler | 仅内存缓存，重启后消失 |
 | 每块预览、单独保存，取消/重启后继续 | Windowed Conditioning → Start / Sample Chunk / End → Assemble → VAE Decode | 磁盘检查点 |
 
-[循环示例](../example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json) ·
+[循环示例](../example_workflows/viggle-animate-h3_workflow-long-video-advanced.json) ·
 [单遍分块示例](../example_workflows/viggle-animate-h3_workflow-chunked-sampler.json)
 
 循环只需要放置一个 Sample Chunk。Windowed Conditioning 自动决定块数，End 自动重复执行，
@@ -47,12 +47,15 @@ Sample Chunk 的 `filename_prefix` 是保存路径前缀，包含运行名、块
 5. End `chunks` 接 Assemble，`chunk_number = 0`，再接最终 VAE Decode 和保存节点。
    输出也设为 24 fps。最终视频使用驱动音频并裁到保留的视频长度；不能直接拼接带重叠的预览视频。
 6. Start 填一个新的 `run_name`，开启 `resume`；Sample Chunk 使用固定 `seed`，
+   示例中的种子控制为 `randomize`，测试取消/恢复前请改为 `fixed`，否则每次排队都会换种子。
    `rerender_chunk = 0`。采样配置见 README 的 sigma 预设：四点基准配 Euler、CFG 1.0，
    ModelSamplingMiniMaxH3 视频/音频 shift 都为 3.0；不要再变换 sigma 列表。
 
 四点列表 `1.0, 0.8571428571428571, 0.6, 0.0` 对应三次采样更新。
 KJNodes CustomSigmas 的 `interpolate_to_steps` 设为 3；六点/八点预设分别设为 5/7。
-末尾保留一个零。六点、八点是同规律的实验扩展，不保证画质提高。
+末尾保留一个零。**4 点 / 3 次 Euler 更新适合快速生成，6 点 / 5 次更新兼顾速度与画质，
+8 点 / 7 次更新偏重画质（可能过度锐化）**。搭配 BasicGuider / CFG 1.0 时，每次 Euler
+更新执行一次模型前向传播；请结合视频和 ComfyUI 模型/量化版本选择。
 
 ## 目录、恢复与重渲染
 
@@ -91,14 +94,15 @@ STRING 可接 Show Text，但循环展开后可能只显示某次迭代；实时
 
 ## 两块恢复测试
 
-使用约 10 秒视频和默认窗口设置（按帧网格裁剪后通常两块）。
+使用 226 帧视频和默认窗口设置（两块）。
 在第二块采样中取消，保持设置不变、启用 `resume` 重排队。
 第一块应恢复并重新解码；第二块重新采样，除非取消前已经保存检查点。
 完成后再次排队应全部恢复。再将 `rerender_chunk = 2` 并更换 `rerender_seed`，验证只重采后缀。
 
 ## 长视频限制
 
-- 视频按 `17k+5` 帧网格对齐，最多丢弃末尾 16 帧；最后一块可能有更大重叠，短片段窗口可能更短。
+- 视频向上生成到 `17k+5` 帧网格，不丢弃已加载参考帧；非网格输入最多多生成 16 帧（最少 5 帧），不在输出末尾复制帧。VAE 编码时仍有内部填充。
+- `chunk_frames` 为窗口上限，最后一块可更短，保持正常重叠步幅。362 帧、124 窗口和 22 重叠对应 0–123、102–225、204–327、306–361，最后一块为 56 帧。361 帧输入也生成到 362，而不是截到 345；无法恢复加载器已丢失的原始帧。
 - 重叠传递不保证无卡顿、无身份漂移；剧烈动作、出入镜、镜头切换仍可能变形，适合按镜头分开生成。
 - 原始视频、全部条件、最终潜变量和最终解码仍需要内存。ComfyUI 缓存可能保留每块解码图像；
   124 帧、1024×576、float32 RGB 每块约 0.82 GiB。循环不是恒定内存方案。

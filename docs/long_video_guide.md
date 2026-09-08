@@ -49,13 +49,13 @@ where the chunks are and what each of them conditions on.
 
 | Input | Meaning |
 |---|---|
-| `cond_video` | The WHOLE driving clip at 24 fps. Its grid-snapped length IS the output length — up to 16 trailing frames are dropped to fit the `17k+5` frame grid. Cut the tail off with the loader's `frame_load_cap` if you want shorter. |
+| `cond_video` | The whole driving clip at 24 fps. Every loaded reference frame is retained; off-grid lengths generate up to 16 additional frames to reach the next `17k+5` boundary (minimum 5). No copied output frames are appended. |
 | `ref_image` | Reference still shared by every chunk. A repainted frame from the driving shot with matching pose/framing conditions best. |
 | `text_cond` | From the Load Text Conditioning node. |
 | `vae` | MiniMax-H3 video VAE (the base model's). Used to encode each window's footage and the still. |
 | `width` / `height` | `0` = the driving clip's own size (the evaluated configuration). Any other value rescales the canvas for every chunk. |
-| `chunk_frames` | Requested window length (default 124). Short clips use a shorter window; lengths follow the temporal grid. |
-| `overlap_frames` | How many frames of the previous chunk's output are carried in and pinned (default 22). The last window may overlap more, because it is placed flush with the clip's end. |
+| `chunk_frames` | Maximum window length (default 124; minimum configurable 22). Short clips and the final window use fewer frames when possible; lengths follow the temporal grid. |
+| `overlap_frames` | Frames carried from the preceding window and pinned (default 22). Clamped below the window length so every new window makes progress. The final window uses the same stride instead of shifting back to force a full window. |
 
 **Outputs**
 
@@ -78,6 +78,16 @@ anyway; it is what makes the graph validate.
   are encoded fresh. The log reports how many blocks were reused. Custom VAE wrappers get the
   full-window path.
 - The log line also prints the full window plan with 1-based chunk numbers.
+
+For 362 loaded frames with 124-frame windows and 22-frame overlap, expect
+**0–123, 102–225, 204–327, 306–361**. The last window is **56 frames**, including
+22 overlap frames and 34 new frames. For 345 frames, the final window is **39 frames**.
+Inputs under 124 frames use a single shorter window on the same grid.
+
+For 361 loaded frames, generation extends to 362, while conditioning receives all
+361 original frames. We do not append repeated reference or output frames in these nodes;
+the H3 VAE retains its standard internal padding for partial encoding blocks.
+This preserves the loaded tail, but cannot recover a source frame lost by the loader.
 
 ---
 
@@ -247,7 +257,7 @@ previews are separate from the durable latent checkpoints.
 
 ## First long-generation setup
 
-Use the [loop example](../example_workflows/viggle-animate-h3_workflow-chunked-window-advanced.json)
+Use the [loop example](../example_workflows/viggle-animate-h3_workflow-long-video-advanced.json)
 for recovery and per-chunk previews, or the [single-pass example](../example_workflows/viggle-animate-h3_workflow-chunked-sampler.json)
 for a compact workflow. The loop example uses VHS video nodes; install VideoHelperSuite
 and any other missing nodes reported when loading the example.
@@ -270,7 +280,13 @@ and any other missing nodes reported when loading the example.
    for the final video and trim it to the retained frame count; chunk previews contain
    overlap, so concatenating preview files is not the final assembly method.
 7. Set a new `run_name`, `resume = true`, a fixed base `seed`, and `rerender_chunk = 0`.
-   Choose the [sigma baseline or experimental presets](../README.md#custom-sigma-presets-48-upstream-style-steps).
+   The supplied loop workflow has seed control set to `randomize`; change it to
+   `fixed` before testing cancellation/resume, or each queue gets a different seed.
+   Choose the [fast, balanced or quality-focused sigma presets](../README.md#custom-sigma-presets-4-6-or-8-points).
+   Use **4 sigma points / 3 Euler updates for speed**, **6 points / 5 updates for
+   balance**, or **8 points / 7 updates for quality (may over-sharpen)**. With
+   BasicGuider / CFG 1.0, each Euler update is one model forward pass. Set KJNodes
+   `interpolate_to_steps` to **3, 5 or 7**, respectively, and retain the final zero.
    Conditioning/VAE encoding happens before chunk sampling, so the live box may still
    say “Waiting” while that work runs.
 
@@ -290,8 +306,8 @@ sent to the browser that queued the run; it is not a persistent log recovered on
 
 ## Quick recovery test and common questions
 
-Try about 10 seconds at the default settings (normally two windows after frame-grid
-trimming). Cancel while chunk 2 is sampling, then requeue unchanged with `resume` on.
+Try a 226-frame clip at the default settings (two windows).
+Cancel while chunk 2 is sampling, then requeue unchanged with `resume` on.
 Chunk 1 restores and decodes again; chunk 2 samples unless its checkpoint was already
 saved. After completion, queue unchanged to check that both restore. Then change
 `rerender_chunk = 2` and `rerender_seed` to test that only the suffix resamples.
@@ -308,7 +324,7 @@ saved. After completion, queue unchanged to check that both restore. Then change
   chunk k changes the carry into k+1 onward; unchanged overrides can reuse a matching take.
 - **Why does the end deform or stutter?** Carry does not guarantee identity or seamless
   motion. Review the driving motion/reference and individual chunks. The final window
-  can have more overlap than requested; more sigma points do not guarantee an improvement.
+  may be shorter; test motion and identity quality locally. More sigma points do not guarantee an improvement.
 - **Why is memory/encoding still high?** The full input and conditioning still occupy memory,
   the execution cache can retain decoded previews, and final assembly needs a full latent
   and decode. Use shorter shots or a smaller canvas when those stages exceed available memory.

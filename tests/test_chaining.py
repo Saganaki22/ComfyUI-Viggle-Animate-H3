@@ -238,7 +238,7 @@ class ChainingTests(unittest.TestCase):
 
     def test_frame_schedule_coverage(self):
         for total in range(5, 1800, 17):
-            for chunk in (39, 56, 124, 243, 362):
+            for chunk in (22, 39, 56, 124, 243, 362):
                 for overlap in (5, 22, 39, 124, 362):
                     spans = viggle.plan_spans(total, chunk, overlap)
                     self.assertEqual((spans[0][0], spans[-1][1]), (0, total - 1))
@@ -246,6 +246,71 @@ class ChainingTests(unittest.TestCase):
                         self.assertEqual((a % 17, (b - a + 1) % 17, start % 5), (0, 5, 0))
                     for left, right in zip(spans, spans[1:]):
                         self.assertLessEqual(right[0], left[1] + 1)
+                        self.assertGreater(right[1], left[1])
+                        self.assertLessEqual(right[3], left[3])
+
+    def test_short_tail_generation_covers_loaded_frames(self):
+        for total in range(1, 400):
+            spans = viggle.plan_spans(total, 124, 22)
+            self.assertEqual(spans[-1][1] + 1, viggle._generation_frame_count(total))
+            self.assertGreaterEqual(spans[-1][1] + 1, total)
+            self.assertLessEqual(spans[-1][1] + 1 - total, 16)
+        self.assertEqual(viggle.plan_spans(362, 124, 22),
+                         [(0, 123, 0, 37), (102, 225, 30, 37),
+                          (204, 327, 60, 37), (306, 361, 90, 17)])
+        self.assertEqual(viggle.plan_spans(345, 124, 22)[-1], (306, 344, 90, 12))
+        self.assertEqual(viggle.plan_spans(124, 124, 22), [(0, 123, 0, 37)])
+
+    def test_conditioning_keeps_every_input_frame_without_appending_copies(self):
+        class RecordingEncoder:
+            def __init__(self):
+                self.inputs = []
+
+            def encode(self, frames):
+                self.inputs.append(frames.clone())
+                return torch.zeros(1, 24, viggle._frames_to_latents(len(frames)), 2, 2)
+
+        text = {"prompt_embeds": conditioning()[0][0], "text_token_tags": torch.zeros(3, dtype=torch.int64)}
+        for total in (1, 4, 5, 21, 22, 38, 39, 56, 73, 90, 107, 123, 124, 125, 345, 361, 362):
+            with self.subTest(total=total):
+                viggle._LATENT_CACHE.clear()
+                vae = RecordingEncoder()
+                video = torch.arange(total, dtype=torch.float32)[:, None, None, None].expand(-1, 32, 32, 3)
+                plan = viggle.ViggleAnimateConditioningWindowed().build(
+                    video, video[:1], text, vae, 0, 0, 124, 22)[0]
+                seen = set()
+                for span, encoded in zip(plan['spans'], vae.inputs[1:]):
+                    a, b, _, _ = span
+                    expected = torch.arange(a, min(b + 1, total)).float()
+                    self.assertTrue(torch.equal(encoded[:, 0, 0, 0], expected))
+                    seen.update(encoded[:, 0, 0, 0].tolist())
+                self.assertEqual(seen, set(range(total)))
+                self.assertEqual(plan['total_frames'], viggle._generation_frame_count(total))
+
+    def test_single_shot_length_is_a_maximum_without_repeated_reference_frames(self):
+        class RecordingEncoder:
+            def __init__(self):
+                self.inputs = []
+
+            def encode(self, frames):
+                self.inputs.append(frames.clone())
+                return torch.zeros(1, 24, viggle._frames_to_latents(
+                    viggle._generation_frame_count(len(frames))), 2, 2)
+
+        text = {"prompt_embeds": conditioning()[0][0], "text_token_tags": torch.zeros(3, dtype=torch.int64)}
+        for total in (1, 4, 5, 22, 39, 55, 56, 57, 73, 90, 107, 123, 124, 125, 362):
+            for maximum in (56, 124):
+                with self.subTest(total=total, maximum=maximum):
+                    viggle._LATENT_CACHE.clear()
+                    vae = RecordingEncoder()
+                    video = torch.arange(total).float()[:, None, None, None].expand(-1, 32, 32, 3)
+                    _, latent = viggle.ViggleAnimateConditioning().build(
+                        video, video[:1], text, vae, 0, 0, maximum)
+                    used = min(total, maximum)
+                    self.assertTrue(torch.equal(vae.inputs[0], video[:used]))
+                    generated = viggle._generation_frame_count(used)
+                    self.assertEqual(latent['samples'].tensors[0].shape[2], viggle._frames_to_latents(generated))
+                    self.assertLessEqual(generated, maximum)
 
     def test_invalid_sigmas_stop_before_sampling(self):
         for values in ([1, 0.89, 0.72, 0, 0], [1, float("nan"), 0],
@@ -292,10 +357,14 @@ class ChainingTests(unittest.TestCase):
 
         text = {"prompt_embeds": conditioning()[0][0], "text_token_tags": torch.zeros(3, dtype=torch.int64)}
         generator = torch.Generator().manual_seed(123)
-        video = torch.rand(345, 32, 32, 3, generator=generator)
+        video = torch.rand(362, 32, 32, 3, generator=generator)
         still = torch.rand(1, 32, 32, 3, generator=generator)
         node = viggle.ViggleAnimateConditioningWindowed()
-        cases = [(5, 124, 22, 0), (39, 124, 22, 0), (124, 124, 22, 0),
+        cases = [(1, 124, 22, 0), (4, 124, 22, 0), (5, 124, 22, 0),
+                 (22, 22, 5, 0), (39, 39, 22, 0), (56, 56, 22, 0),
+                 (73, 73, 22, 0), (90, 90, 22, 0), (107, 107, 22, 0),
+                 (123, 124, 22, 0), (124, 124, 22, 0), (125, 124, 22, 0),
+                 (361, 124, 22, 0), (362, 124, 22, 0),
                  (345, 124, 22, 0), (345, 124, 5, 0), (345, 124, 39, 0),
                  (260, 56, 39, 0), (345, 124, 22, 64)]
         with patch.object(comfy.model_management, "load_models_gpu"):
@@ -315,7 +384,7 @@ class ChainingTests(unittest.TestCase):
                     for encoded in new_calls:
                         self.assertTrue(any(torch.equal(encoded, original) for original in old_calls))
                     if (total, chunk, overlap, size) == (345, 124, 22, 0):
-                        self.assertEqual((len(old_calls) - 1, len(new_calls) - 1), (32, 24))
+                        self.assertEqual((len(old_calls) - 1, len(new_calls) - 1), (27, 24))
                     before = len(new_calls)
                     warm = node.build(*args, new_vae, size, size, chunk, overlap)[0]
                     self.assertEqual(before, len(new_calls))

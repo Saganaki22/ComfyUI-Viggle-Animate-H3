@@ -151,7 +151,7 @@ class ViggleAnimateConditioning:
             "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
                                "tooltip": "Target height. 0 = driving clip's own height."}),
             "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17,
-                               "tooltip": "Frames at 24 fps, snapped to the 17k+5 grid (124 = ~5.2 s)."}),
+                               "tooltip": "Maximum frames at 24 fps (124 = ~5.2 s). Shorter inputs automatically use a shorter 17k+5 generation length."}),
         }}
 
     RETURN_TYPES = ("CONDITIONING", "LATENT")
@@ -175,16 +175,15 @@ class ViggleAnimateConditioning:
         max_pixels = short_edge * max(tgt_w, tgt_h)
         ch, cw = resolve_canvas(tgt_w, tgt_h, short_edge, max_pixels)
 
-        frame_count, latent_t, audio_t = core_h3.temporal_shape(length)
+        max_frames, _, _ = core_h3.temporal_shape(length)
+        n = min(cond_video.shape[0], max_frames)
+        if n < 1:
+            raise ValueError("Viggle-Animate: driving clip contains no frames")
+        frame_count, latent_t, audio_t = core_h3.temporal_shape(_generation_frame_count(n))
 
         # ---- reference 1: the driving video (first in the presentation) ----
         rh, rw = resolve_canvas(vw, vh, short_edge, max_pixels)
-        n = min(cond_video.shape[0], frame_count)
-        if n < 5:
-            raise ValueError("Viggle-Animate: driving clip needs at least 5 frames (~0.2 s at 24 fps)")
-        while n % 17 != 5:
-            n -= 1
-        frames = cond_video[:n]  # truncate before resampling: dropped frames never see lanczos
+        frames = cond_video[:n]
         vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
         z_video = _cache_get(vkey, vae)
         if z_video is None:
@@ -235,17 +234,22 @@ def _frames_to_latents(fc):
     return 2 if fc <= 5 else ((fc - 5) // 17) * 5 + 2
 
 
+def _generation_frame_count(fc):
+    fc = max(5, int(fc))
+    return fc + (5 - fc) % 17
+
+
 def plan_spans(total_f, chunk_f, overlap_f):
     """Static window schedule: frames + latent placement.
 
-    Full 17j+5 windows laid at a stride that keeps every start on latent phase
-    0; the LAST window starts flush at total-chunk, so every render runs at the
-    trained chunk length and the slack becomes extra overlap with the window
-    before it. Returns [(first_frame, last_frame, lat_start, lat_count), ...]
-    covering 0..total_f-1.
+    Windows keep each start on latent phase 0 and preserve the overlap stride.
+    The final window uses only the remaining latents, including overlap.
+    Returns [(first_frame, last_frame, lat_start, lat_count), ...], covering
+    every input frame, with the end rounded UP to the 17j+5 frame grid.
     """
     L = _frames_to_latents(int(chunk_f))
-    total_lat = _frames_to_latents(int(total_f))
+    total_f = _generation_frame_count(total_f)
+    total_lat = _frames_to_latents(total_f)
     if L < 7:
         raise ValueError("Viggle-Animate: chunk_frames must be at least 22 frames (124 recommended).")
     if L >= total_lat:
@@ -253,11 +257,14 @@ def plan_spans(total_f, chunk_f, overlap_f):
     O = _frames_to_latents(max(5, int(overlap_f)))
     O = max(2, min(O, L - 5))          # stride stays a multiple of 5 (phase 0)
     stride = L - O
-    starts = list(range(0, total_lat - L + 1, stride))
-    last = total_lat - L
-    if starts[-1] != last:
-        starts.append(last)
-    return [(_frame_at_latent(s), _frame_at_latent(s + L) - 1, s, L) for s in starts]
+    spans = []
+    start = 0
+    while True:
+        length = min(L, total_lat - start)
+        spans.append((_frame_at_latent(start), _frame_at_latent(start + length) - 1, start, length))
+        if start + length == total_lat:
+            return spans
+        start += stride
 
 
 # Rendered-chunk cache. With carry, chunks are CHAINED: chunk i+1 pins the
@@ -355,7 +362,7 @@ class ViggleAnimateConditioningWindowed:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "cond_video": ("IMAGE", {"tooltip": "The WHOLE driving clip at 24 fps. Its (grid-snapped) length IS the output length — cut the tail off with Load Video's frame_load_cap if you want shorter."}),
+            "cond_video": ("IMAGE", {"tooltip": "The whole driving clip at 24 fps. All loaded frames are used as reference. Generation ends on the next H3 frame-grid boundary, up to 16 frames longer (minimum 5)."}),
             "ref_image": ("IMAGE", {"tooltip": "Reference still shared by all chunks. A repainted frame from the driving shot with matching pose and framing gives the strongest reference."}),
             "text_cond": ("TEXT_COND", {"tooltip": "From the Load Text Conditioning node."}),
             "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE (from the base model)."}),
@@ -363,10 +370,10 @@ class ViggleAnimateConditioningWindowed:
                               "tooltip": "Target width. 0 = driving clip's own width (the evaluated configuration)."}),
             "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
                                "tooltip": "Target height. 0 = driving clip's own height."}),
-            "chunk_frames": ("INT", {"default": 124, "min": 39, "max": 3600, "step": 17,
-                                     "tooltip": "Render length per chunk, frames at 24 fps. 124 is the finetune's evaluated operating point — every chunk runs at exactly this length."}),
+            "chunk_frames": ("INT", {"default": 124, "min": 22, "max": 3600, "step": 17,
+                                     "tooltip": "Maximum window length on H3's 17k+5 grid. The final window can be shorter. 124 is the usual baseline; shorter windows need visual testing."}),
             "overlap_frames": ("INT", {"default": 22, "min": 5, "max": 3600, "step": 17,
-                                       "tooltip": "Overlap carried from the preceding chunk and preserved during sampling. The final window may overlap more to reach the clip's end."}),
+                                       "tooltip": "Overlap carried from the preceding chunk and preserved during sampling. Clamped below the window length so each chunk generates new frames."}),
         }}
 
     RETURN_TYPES = ("VIGGLE_COND_SET", "CONDITIONING")
@@ -390,16 +397,15 @@ class ViggleAnimateConditioningWindowed:
         ch, cw = resolve_canvas(tgt_w, tgt_h, short_edge, max_pixels)
         rh, rw = resolve_canvas(vw, vh, short_edge, max_pixels)
 
-        # ---- total length = the clip itself, snapped DOWN to 17j+5 --------
-        total_f = cond_video.shape[0]
-        asked_f = total_f
-        while total_f % 17 != 5 and total_f > 5:
-            total_f -= 1
-        if total_f < 5:
-            raise ValueError("Viggle-Animate: driving clip needs at least 5 frames (~0.2 s at 24 fps)")
+        # Round the generation extent up, retaining the original reference frames.
+        asked_f = cond_video.shape[0]
+        if asked_f < 1:
+            raise ValueError("Viggle-Animate: driving clip needs at least one frame.")
+        total_f = _generation_frame_count(asked_f)
         if total_f != asked_f:
             logging.info("[ViggleAnimateConditioningWindowed] %d frames -> %d on the 17j+5 "
-                         "grid, %d dropped from the tail", asked_f, total_f, asked_f - total_f)
+                         "generation grid, %d additional frames to generate; all loaded reference frames retained",
+                         asked_f, total_f, total_f - asked_f)
 
         spans = plan_spans(total_f, chunk_frames, overlap_frames)
 
@@ -424,12 +430,6 @@ class ViggleAnimateConditioningWindowed:
         reused_blocks = 0
         for i, (a, b, _lat0, latn) in enumerate(spans):
             n = b - a + 1
-            while n % 17 != 5:  # grid-valid by construction; kept as a safety net
-                n -= 1
-            if n < 5:
-                raise ValueError(f"Viggle-Animate: chunk {i}'s window (frames {a}-{b}) is "
-                                 "under 5 frames after grid snapping — raise chunk_frames or "
-                                 "lower overlap_frames.")
             frames = cond_video[a:a + n]
             vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
             z_video = _cache_get(vkey, vae)
