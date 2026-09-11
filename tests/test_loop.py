@@ -61,6 +61,18 @@ class RecordingVAE:
         return torch.ones(1, 8, 8, 3)
 
 
+class AnchorVAE(RecordingVAE):
+    def encode(self, frames):
+        self.record.append(("encode", len(frames)))
+        return torch.full((1, 24, 2, 2, 2), frames.mean().item())
+
+    def decode(self, latent):
+        self.record.append(("decode", tuple(latent.shape)))
+        self.last_latent = latent.clone()
+        n = viggle._frame_at_latent(latent.shape[2])
+        return torch.full((n, 32, 32, 3), latent.mean().item())
+
+
 def make_model_patcher():
     module = torch.nn.Module()
     module.model_sampling = comfy.model_sampling.ModelSamplingAV()
@@ -354,6 +366,36 @@ class LoopTests(unittest.TestCase):
         self.assertIn(f"frames {span[0]}-{span[1]}", status)
         with self.assertRaises(ValueError):
             node.assemble("assemble_run", self.n_chunks + 1, None)
+
+    def test_anchor_loop_matches_sampler_and_resumes(self):
+        plan, self.n_chunks = cond_set_fixture(328, 124, 5)
+        plan["continuation"] = "five_frame_anchor"
+        plan["source_frames"] = 322
+        TestCondSet.cond_set = plan
+        vae = TestVAE.vae = AnchorVAE(self.record)
+        prompt = self.prompt("anchor_loop")
+        prompt["9"]["inputs"]["vae"] = ["11", 0]
+        self.assertTrue(self.execute(prompt).success)
+        self.assertEqual([e[1] for e in self.record if e[0] == "encode"], [5, 5])
+        assembled, _ = loop.ViggleAssembleChunkLatents().assemble("anchor_loop", 0)
+        with patch.object(core.Guider_Basic, "sample", fake_sample_record([])), \
+             patch.object(comfy.sample, "fix_empty_latent_channels", lambda model, samples: samples), \
+             patch.object(viggle.latent_preview, "prepare_callback", lambda *a, **k: None):
+            guider = core.Guider_Basic(self.model)
+            guider.set_conds(conditioning())
+            frames, _ = viggle.ViggleChunkedSampler().sample(guider, comfy.samplers.ksampler('euler'),
+                torch.tensor([1.0, 6 / 7, 0.6, 0.0]), plan, vae, 42, 0, 0)
+        self.assertEqual(len(frames), 322)
+        self.assertTrue(torch.equal(assembled['samples'], vae.last_latent))
+        self.record.clear()
+        prompt["8"]["inputs"]["resume"] = True
+        self.assertTrue(self.execute(prompt).success)
+        self.assertEqual([e[0] for e in self.record], ["decode"] * self.n_chunks)
+        self.record.clear()
+        prompt["9"]["inputs"].update(rerender_chunk=2, rerender_seed=999)
+        self.assertTrue(self.execute(prompt).success)
+        self.assertEqual([e[1] for e in self.record if e[0] == "sample"], [999, 44])
+        self.assertEqual([e[1] for e in self.record if e[0] == "encode"], [5, 5])
 
     def test_short_windows_decode_full_length_and_resume_rerender(self):
         # Exercise the real H3 temporal decoder; only the learned spatial

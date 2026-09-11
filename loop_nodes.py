@@ -19,7 +19,7 @@ from comfy_execution.graph_utils import GraphBuilder, is_link
 
 from comfy_extras import nodes_custom_sampler as core_sampler
 
-from .nodes import FPS, ViggleChunkedSampler, _hash_cache_value, _validate_sigmas, _send_progress
+from .nodes import FPS, ViggleChunkedSampler, _hash_cache_value, _validate_sigmas, _send_progress, _encode_anchor
 
 CHECKPOINT_VERSION = 1
 
@@ -103,10 +103,13 @@ def _sampling_graph_signature(dynprompt, unique_id):
 
     node = dynprompt.get_node(unique_id)
     roots = [node["inputs"][key] for key in ("guider", "sampler", "sigmas")]
+    if "vae" in node["inputs"]:
+        roots.append(node["inputs"]["vae"])
     data = [(describe(value[0]), value[1]) for value in roots]
     data += [hashlib.sha256(Path(inspect.getsourcefile(core_sampler.Noise_RandomNoise)).read_bytes()).hexdigest()]
     # Changes to our carry/serialization implementation invalidate saved sampling.
-    data += [hashlib.sha256(Path(__file__).read_bytes()).hexdigest()]
+    data += [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+             hashlib.sha256(Path(inspect.getsourcefile(ViggleChunkedSampler)).read_bytes()).hexdigest()]
     return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
@@ -167,6 +170,7 @@ class ViggleSampleChunk:
         inputs = ViggleChunkedSampler.INPUT_TYPES()["required"]
         return {"required": {"state": ("VIGGLE_LOOP_STATE",),
                              **{name: inputs[name] for name in ("guider", "sampler", "sigmas", "seed", "rerender_chunk", "rerender_seed")}},
+                "optional": {"vae": ("VAE", {"tooltip": "Connect the H3 VAE for five_frame_anchor continuation."})},
                 "hidden": {"dynprompt": "DYNPROMPT", "unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("VIGGLE_LOOP_STATE", "LATENT", "STRING")
@@ -176,16 +180,19 @@ class ViggleSampleChunk:
     DESCRIPTION = "Sample and checkpoint one chunk before external VAE decoding. Use between Viggle Chunk Loop Start and End."
 
     def sample(self, state, guider, sampler, sigmas, seed, rerender_chunk, rerender_seed,
-               dynprompt, unique_id):
+               dynprompt, unique_id, vae=None):
         _validate_sigmas(sigmas)
         plan, i = state["plan"], state["index"]
+        continuation = plan.get("continuation", "latent_overlap")
+        if continuation == "five_frame_anchor" and vae is None:
+            raise ValueError("Viggle: connect the H3 VAE to Sample Chunk for five_frame_anchor continuation.")
         a, b, lat0, latn = plan["spans"][i]
         ch, cw = plan["canvas"]
         seed_i = (int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i) % (1 << 64)
         signature = state["graph_signature"] or _sampling_graph_signature(dynprompt, unique_id)
         predecessor = state["entries"][-1]["key"] if i else ""
         h = hashlib.sha256()
-        values = (CHECKPOINT_VERSION, signature, predecessor, plan["conds"][i], sigmas,
+        values = (CHECKPOINT_VERSION, signature, continuation, predecessor, plan["conds"][i], sigmas,
                   (a, b, lat0, latn), (ch, cw), seed_i)
         if not _hash_cache_value(h, values):
             raise ValueError("Viggle: this conditioning cannot be fingerprinted for checkpoint recovery.")
@@ -210,13 +217,18 @@ class ViggleSampleChunk:
             carry = 0
             if previous is not None:
                 pa, pb, pstart, plen = previous["span"]
-                carry = max(0, pstart + plen - lat0)
-                if carry:
-                    v[:, :, :carry] = previous["video"][:, :, lat0 - pstart:lat0 - pstart + carry].to(dev)
-                audio_overlap = max(0, round((pb + 1) / FPS * 40) - a0)
-                audio_offset = a0 - round(pa / FPS * 40)
-                if audio_overlap:
-                    au[..., :audio_overlap] = previous["audio"][..., audio_offset:audio_offset + audio_overlap].to(dev)
+                if continuation == "five_frame_anchor":
+                    anchor = _encode_anchor(vae, previous["video"].to(dev), a - pa)
+                    carry = anchor.shape[2]
+                    v[:, :, :carry] = anchor.to(v)
+                else:
+                    carry = max(0, pstart + plen - lat0)
+                    if carry:
+                        v[:, :, :carry] = previous["video"][:, :, lat0 - pstart:lat0 - pstart + carry].to(dev)
+                    audio_overlap = max(0, round((pb + 1) / FPS * 40) - a0)
+                    audio_offset = a0 - round(pa / FPS * 40)
+                    if audio_overlap:
+                        au[..., :audio_overlap] = previous["audio"][..., audio_offset:audio_offset + audio_overlap].to(dev)
             out_v, out_a = ViggleChunkedSampler()._sample_window(
                 core_sampler.Noise_RandomNoise(seed_i), guider, sampler, sigmas, plan["conds"][i], seed_i,
                 ch, cw, a, b, carry, v, au)
@@ -226,12 +238,13 @@ class ViggleSampleChunk:
             _atomic_write(path, lambda temporary: safetensors.torch.save_file(tensors, temporary, metadata=metadata))
         entries = state["entries"] + [entry]
         collection = {"version": CHECKPOINT_VERSION, "run_name": state["run_name"],
-                      "canvas": list(plan["canvas"]), "total_frames": plan["total_frames"], "entries": entries}
+                      "canvas": list(plan["canvas"]), "total_frames": plan["total_frames"],
+                      "continuation": continuation, "entries": entries}
         manifest = directory / "manifest.json"
         saved_collection = collection
         if restored and manifest.exists():
             existing = json.loads(manifest.read_text(encoding="utf-8"))
-            if (all(existing.get(k) == collection[k] for k in ("version", "run_name", "canvas", "total_frames"))
+            if (all(existing.get(k) == collection[k] for k in ("version", "run_name", "canvas", "total_frames", "continuation"))
                     and existing.get("entries", [])[:len(entries)] == entries):
                 # Replaying previews must not hide the already completed suffix
                 # if decoding or saving fails before the loop reaches it again.
@@ -273,7 +286,8 @@ class ViggleChunkLoopEnd:
         if chunk["index"] == len(chunk["plan"]["spans"]):
             collection = {"version": CHECKPOINT_VERSION, "run_name": chunk["run_name"],
                           "canvas": list(chunk["plan"]["canvas"]),
-                          "total_frames": chunk["plan"]["total_frames"], "entries": chunk["entries"]}
+                          "total_frames": chunk["plan"]["total_frames"],
+                          "continuation": chunk["plan"].get("continuation", "latent_overlap"), "entries": chunk["entries"]}
             return (collection, f"Completed {chunk['index']} chunks. Saved in {_run_dir(chunk['run_name'])}")
 
         # Copy only nodes lying between Loop Start and this End, as in ComfyUI's
@@ -353,7 +367,8 @@ class ViggleAssembleChunkLatents:
             video, _ = _read_checkpoint(directory, entry, chunks["canvas"])
             if master is None:
                 master = torch.empty((1, 24, last[2] + last[3], ch // 16, cw // 16), dtype=video.dtype, device="cpu")
-            master[:, :, start:start + count] = video
+            local_start = max(0, previous_end - start) if chunks.get("continuation") == "five_frame_anchor" else 0
+            master[:, :, start + local_start:start + count] = video[:, :, local_start:]
             predecessor, previous_end = entry["key"], start + count
         complete = last[1] + 1 == chunks["total_frames"]
         return ({"samples": master}, f"{'Complete' if complete else 'Partial'}: {len(entries)} chunks, {last[1] + 1} frames. Decode once for the final video.")

@@ -1302,13 +1302,15 @@
         0,
         0,
         124,
-        22
+        22,
+        "five_frame_anchor"
       ],
       "widgets_values_named": {
         "width": 0,
         "height": 0,
         "chunk_frames": 124,
-        "overlap_frames": 22
+        "overlap_frames": 22,
+        "continuation": "five_frame_anchor"
       },
       "color": "#232",
       "bgcolor": "#353"

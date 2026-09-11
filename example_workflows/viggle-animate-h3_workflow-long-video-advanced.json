@@ -2,7 +2,7 @@
   "id": "fcb8e89e-09b8-4c99-bbd2-b993322b287e",
   "revision": 0,
   "last_node_id": 70,
-  "last_link_id": 93,
+  "last_link_id": 94,
   "nodes": [
     {
       "id": 11,
@@ -283,7 +283,8 @@
           "links": [
             51,
             60,
-            67
+            67,
+            94
           ]
         }
       ],
@@ -1316,13 +1317,15 @@
         0,
         0,
         124,
-        22
+        22,
+        "five_frame_anchor"
       ],
       "widgets_values_named": {
         "width": 0,
         "height": 0,
         "chunk_frames": 124,
-        "overlap_frames": 22
+        "overlap_frames": 22,
+        "continuation": "five_frame_anchor"
       },
       "color": "#232",
       "bgcolor": "#353"
@@ -2073,6 +2076,11 @@
           "name": "sigmas",
           "type": "SIGMAS",
           "link": 91
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 94
         }
       ],
       "outputs": [
@@ -2443,6 +2451,14 @@
       55,
       0,
       "LATENT"
+    ],
+    [
+      94,
+      4,
+      0,
+      70,
+      4,
+      "VAE"
     ]
   ],
   "groups": [
