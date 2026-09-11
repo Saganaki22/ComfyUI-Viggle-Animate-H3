@@ -221,6 +221,81 @@ class ChainingTests(unittest.TestCase):
             suffix_fresh = run(2, 123)
             self.assertTrue(torch.equal(suffix_cached, suffix_fresh))
 
+    def test_decode_trims_padding_and_rejects_missing_source_frames(self):
+        plan = {"spans": [(0, 21, 0, 7)], "conds": [conditioning()],
+                "total_frames": 22, "source_frames": 20, "canvas": (32, 32)}
+        pixels = torch.arange(22).reshape(22, 1, 1, 1).expand(-1, 2, 2, 3)
+        with patch.object(self.node, "_render_chunk", return_value=(torch.zeros(1), torch.zeros(1))), \
+             patch.object(viggle, "_chunk_cache_get", return_value=None), \
+             patch.object(DecodeVAE, "decode", return_value=pixels) as decode:
+            frames, _ = self.node.sample(self.guider, self.sampler, self.sigmas,
+                                         plan, DecodeVAE(), 10, 0, 0)
+            self.assertTrue(torch.equal(frames, pixels[:20]))
+            decode.return_value = pixels[:19]
+            with self.assertRaisesRegex(ValueError, "shorter than the source"):
+                self.node.sample(self.guider, self.sampler, self.sigmas,
+                                 plan, DecodeVAE(), 10, 0, 0)
+
+    def test_five_frame_anchor_offsets_assembly_cache_and_rerender(self):
+        class AnchorVAE:
+            def __init__(self):
+                self.encoded = []
+                self.decoded = []
+
+            def decode(self, video):
+                self.decoded.append(video.clone())
+                n = viggle._frame_at_latent(video.shape[2])
+                return (torch.arange(n).float() + video[0, 0, 0, 0, 0] * 1000).reshape(n, 1, 1, 1).expand(-1, 32, 32, 3)
+
+            def encode(self, frames):
+                self.encoded.append(frames.clone())
+                return torch.full((1, 24, 2, 2, 2), frames[0, 0, 0, 0].item() + 100)
+
+        vae = AnchorVAE()
+        spans = viggle.plan_spans(322, 124, 5)
+        plan = {"spans": spans, "conds": [conditioning() for _ in spans],
+                "total_frames": 328, "source_frames": 322, "canvas": (32, 32),
+                "continuation": "five_frame_anchor"}
+        calls = []
+        def sample(noise, guider, sampler, sigmas, cond, seed, ch, cw, a, b, carry, v, au):
+            calls.append((seed, carry, v.clone(), au.clone()))
+            # Deliberately change even overlap values to verify assembly keeps
+            # the accepted prefix, including the final window's warm-up region.
+            return torch.full_like(v, seed), torch.full_like(au, seed)
+
+        with patch.object(self.node, "_sample_window", side_effect=sample):
+            frames, _ = self.node.sample(self.guider, self.sampler, self.sigmas, plan, vae, 10, 0, 0)
+            self.assertEqual(len(frames), 322)
+            self.assertEqual([c[:2] for c in calls], [(10, 0), (11, 2), (12, 2)])
+            self.assertTrue(torch.equal(vae.encoded[0][:, 0, 0, 0], torch.arange(119, 124) + 10000))
+            self.assertTrue(torch.equal(vae.encoded[1][:, 0, 0, 0], torch.arange(85, 90) + 11000))
+            for call, encoded in zip(calls[1:], vae.encoded):
+                self.assertTrue((call[2][:, :, :2] == encoded[0, 0, 0, 0] + 100).all())
+                self.assertEqual(call[2][:, :, 2:].count_nonzero(), 0)
+                self.assertEqual(call[3].count_nonzero(), 0)
+            master = vae.decoded[-1]
+            self.assertTrue((master[:, :, :37] == 10).all())
+            self.assertTrue((master[:, :, 37:72] == 11).all())
+            self.assertTrue((master[:, :, 72:] == 12).all())
+            self.node.sample(self.guider, self.sampler, self.sigmas, plan, vae, 10, 0, 0)
+            self.assertEqual(len(calls), 3)
+            self.node.sample(self.guider, self.sampler, self.sigmas, plan, vae, 10, 2, 99)
+            self.assertEqual([c[0] for c in calls], [10, 11, 12, 99, 12])
+            self.assertTrue((vae.decoded[-1][:, :, :37] == 10).all())
+            self.assertTrue((vae.decoded[-1][:, :, 37:72] == 99).all())
+            self.node.sample(self.guider, self.sampler, self.sigmas, plan, AnchorVAE(), 10, 0, 0)
+            self.assertEqual([c[0] for c in calls[-3:]], [10, 11, 12])
+
+    def test_anchor_rejects_short_decode_and_wrong_encoder(self):
+        vae = type("VAE", (), {})()
+        vae.decode = lambda video: torch.zeros(4, 32, 32, 3)
+        with self.assertRaisesRegex(ValueError, "five finite"):
+            viggle._encode_anchor(vae, torch.zeros(1), 0)
+        vae.decode = lambda video: torch.zeros(5, 32, 32, 3)
+        vae.encode = lambda frames: torch.zeros(1, 24, 1, 2, 2)
+        with self.assertRaisesRegex(ValueError, "two finite"):
+            viggle._encode_anchor(vae, torch.zeros(1), 0)
+
     def test_comfy_core_alias_cache_and_suffix_rerender(self):
         spec = importlib.util.spec_from_file_location("viggle_chaining_core_alias", core.__file__)
         alias = importlib.util.module_from_spec(spec)
@@ -247,9 +322,13 @@ class ChainingTests(unittest.TestCase):
                     for left, right in zip(spans, spans[1:]):
                         self.assertLessEqual(right[0], left[1] + 1)
                         self.assertGreater(right[1], left[1])
-                        self.assertLessEqual(right[3], left[3])
+                        self.assertEqual(right[3], left[3])
 
-    def test_short_tail_generation_covers_loaded_frames(self):
+    def test_full_final_window_preserves_source_ending(self):
+        self.assertEqual(viggle.plan_spans(192, 124, 22),
+                         [(0, 123, 0, 37), (68, 191, 20, 37)])
+        self.assertEqual(viggle.plan_spans(322, 124, 5),
+                         [(0, 123, 0, 37), (119, 242, 35, 37), (204, 327, 60, 37)])
         for total in range(1, 400):
             spans = viggle.plan_spans(total, 124, 22)
             self.assertEqual(spans[-1][1] + 1, viggle._generation_frame_count(total))
@@ -257,11 +336,11 @@ class ChainingTests(unittest.TestCase):
             self.assertLessEqual(spans[-1][1] + 1 - total, 16)
         self.assertEqual(viggle.plan_spans(362, 124, 22),
                          [(0, 123, 0, 37), (102, 225, 30, 37),
-                          (204, 327, 60, 37), (306, 361, 90, 17)])
-        self.assertEqual(viggle.plan_spans(345, 124, 22)[-1], (306, 344, 90, 12))
+                          (204, 327, 60, 37), (238, 361, 70, 37)])
+        self.assertEqual(viggle.plan_spans(345, 124, 22)[-1], (221, 344, 65, 37))
         self.assertEqual(viggle.plan_spans(124, 124, 22), [(0, 123, 0, 37)])
 
-    def test_conditioning_keeps_every_input_frame_without_appending_copies(self):
+    def test_conditioning_keeps_source_and_pads_only_grid_tail(self):
         class RecordingEncoder:
             def __init__(self):
                 self.inputs = []
@@ -271,7 +350,7 @@ class ChainingTests(unittest.TestCase):
                 return torch.zeros(1, 24, viggle._frames_to_latents(len(frames)), 2, 2)
 
         text = {"prompt_embeds": conditioning()[0][0], "text_token_tags": torch.zeros(3, dtype=torch.int64)}
-        for total in (1, 4, 5, 21, 22, 38, 39, 56, 73, 90, 107, 123, 124, 125, 345, 361, 362):
+        for total in (1, 4, 5, 21, 22, 38, 39, 56, 73, 90, 107, 123, 124, 125, 289, 345, 361, 362):
             with self.subTest(total=total):
                 viggle._LATENT_CACHE.clear()
                 vae = RecordingEncoder()
@@ -281,11 +360,14 @@ class ChainingTests(unittest.TestCase):
                 seen = set()
                 for span, encoded in zip(plan['spans'], vae.inputs[1:]):
                     a, b, _, _ = span
-                    expected = torch.arange(a, min(b + 1, total)).float()
+                    expected = torch.arange(a, b + 1).clamp(max=total - 1).float()
                     self.assertTrue(torch.equal(encoded[:, 0, 0, 0], expected))
                     seen.update(encoded[:, 0, 0, 0].tolist())
                 self.assertEqual(seen, set(range(total)))
                 self.assertEqual(plan['total_frames'], viggle._generation_frame_count(total))
+                self.assertEqual(plan['source_frames'], total)
+                self.assertEqual(plan['continuation'], 'five_frame_anchor')
+                self.assertEqual(plan['spans'], viggle.plan_spans(total, 124, 5))
 
     def test_single_shot_length_is_a_maximum_without_repeated_reference_frames(self):
         class RecordingEncoder:
@@ -365,7 +447,7 @@ class ChainingTests(unittest.TestCase):
                  (73, 73, 22, 0), (90, 90, 22, 0), (107, 107, 22, 0),
                  (123, 124, 22, 0), (124, 124, 22, 0), (125, 124, 22, 0),
                  (361, 124, 22, 0), (362, 124, 22, 0),
-                 (345, 124, 22, 0), (345, 124, 5, 0), (345, 124, 39, 0),
+                 (289, 124, 22, 0), (289, 124, 5, 0), (345, 124, 22, 0), (345, 124, 5, 0), (345, 124, 39, 0),
                  (260, 56, 39, 0), (345, 124, 22, 64)]
         with patch.object(comfy.model_management, "load_models_gpu"):
             for total, chunk, overlap, size in cases:
@@ -374,9 +456,12 @@ class ChainingTests(unittest.TestCase):
                     old_vae, old_calls = make_vae(WrappedVAE)
                     new_vae, new_calls = make_vae(comfy.sd.VAE)
                     args = (video[:total], still, text)
-                    old = node.build(*args, old_vae, size, size, chunk, overlap)[0]
-                    new = node.build(*args, new_vae, size, size, chunk, overlap)[0]
+                    old = node.build(*args, old_vae, size, size, chunk, overlap, "latent_overlap")[0]
+                    new = node.build(*args, new_vae, size, size, chunk, overlap, "latent_overlap")[0]
                     self.assertEqual(old["spans"], new["spans"])
+                    for plan in (old, new):
+                        for span, cond in zip(plan["spans"], plan["conds"]):
+                            self.assertEqual(cond[0][1]["minimax_refs"][0]["latent"].shape[2], span[3])
                     for left, right in zip(old["conds"], new["conds"]):
                         for a, b in zip(left[0][1]["minimax_refs"], right[0][1]["minimax_refs"]):
                             self.assertTrue(torch.equal(a["latent"], b["latent"]))
@@ -384,9 +469,9 @@ class ChainingTests(unittest.TestCase):
                     for encoded in new_calls:
                         self.assertTrue(any(torch.equal(encoded, original) for original in old_calls))
                     if (total, chunk, overlap, size) == (345, 124, 22, 0):
-                        self.assertEqual((len(old_calls) - 1, len(new_calls) - 1), (27, 24))
+                        self.assertEqual((len(old_calls) - 1, len(new_calls) - 1), (32, 24))
                     before = len(new_calls)
-                    warm = node.build(*args, new_vae, size, size, chunk, overlap)[0]
+                    warm = node.build(*args, new_vae, size, size, chunk, overlap, "latent_overlap")[0]
                     self.assertEqual(before, len(new_calls))
                     for cold_cond, warm_cond in zip(new["conds"], warm["conds"]):
                         self.assertTrue(torch.equal(cold_cond[0][1]["minimax_refs"][0]["latent"],

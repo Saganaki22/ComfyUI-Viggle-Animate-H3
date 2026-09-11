@@ -14,6 +14,14 @@ The sampler is DMD2-distilled and works with very low step counts. **The upstrea
 
 For these manual presets with Euler and BasicGuider / CFG 1.0, **4 sigma points = 3 sampling updates / model forward passes**, **6 points = 5**, and **8 points = 7**. The final `0.0` is included in the point count. For ComfyUI and the converted/quantized models, choose **4 points for speed, 6 for balance, or 8 for quality (may over-sharpen)**.
 
+## New in 1.3.2
+
+- Fix final-window motion-reference length mismatches for off-grid source lengths. The final reference is padded before VAE encoding to match the target latent count; this resolved the reported ending drift in the maintainer's 289-frame test.
+- Restore full-size, end-aligned final windows while preserving the source ending.
+- Add `five_frame_anchor` continuation (default), using five decoded/re-encoded frames and preserving already accepted output. Select `latent_overlap` to compare with the previous method.
+- The Chunked Sampler trims decoded grid padding to the loaded source frame count. The advanced loop still returns latents; its external decode includes grid padding.
+- Update example workflows and checkpoint handling. Restart ComfyUI and refresh the browser. Older loop workflows need the H3 VAE connected to **Sample Chunk** for anchor mode. Code changes invalidate automatic checkpoint reuse; existing files remain readable.
+
 ## New in 1.3.0
 
 Added windowed conditioning and the **Viggle Chunked Sampler** for longer clips, with latent carry, chunk reuse and seed overrides for another take. Added **4-, 6- and 8-point custom sigma presets**, derived from the upstream shift-3 formula: **fast, balanced, and quality-focused (may over-sharpen)**, respectively.
@@ -174,7 +182,7 @@ Keep **Euler**, **BasicGuider / CFG 1.0**, and model shifts **3.0 / 3.0**. The f
 
 Example workflow (Windowed Conditioning + Chunked Sampler): [example_workflows/viggle-animate-h3_workflow-chunked-sampler.json](example_workflows/viggle-animate-h3_workflow-chunked-sampler.json).
 
-Connect **Viggle-Animate Conditioning (H3, Windowed)** to **Viggle Chunked Sampler**. Its `guider_positive` output supplies BasicGuider's conditioning (or CFGGuider's positive). Start with 124-frame chunks and 22-frame overlap. Prior output is preserved in each overlap, and the assembled latent is decoded once. Motion and appearance can still change at joins; use a repainted reference frame from the driving shot and keep the input/output at 24 fps.
+Connect **Viggle-Animate Conditioning (H3, Windowed)** to **Viggle Chunked Sampler**. Its `guider_positive` output supplies BasicGuider's conditioning (or CFGGuider's positive). Start with 124-frame chunks and `continuation = five_frame_anchor` (the default). Each continuation decodes the preceding chunk, selects five frames at the next window start, and re-encodes them into two pinned H3 latents. Normal windows advance 119 frames. Only new positions are accepted into the final latent; extra overlap in the end-aligned final window cannot overwrite earlier output. `latent_overlap` restores the previous method and uses `overlap_frames` for comparison. Motion and appearance can still change at joins; use a repainted reference frame from the driving shot and keep the input/output at 24 fps.
 
 Windowed conditioning reuses complete 17-frame encoder blocks from the preceding window when using the standard ComfyUI H3 VAE. Each window's padded tail is still encoded separately. This reduces repeated VAE work without reducing resolution, changing precision or enlarging the encoding window; custom VAE wrappers retain the full-window path. The log reports how many blocks were reused. Higher resolution and longer clips still cost more to encode.
 
@@ -192,17 +200,21 @@ Keep the same override to retain that take, or change `rerender_seed` for anothe
 
 ### Chaining and rerender limitations
 
-- You cannot change one chunk and keep all later chunks fixed: the overlap is carried forward. Existing overlap from the preceding chunk stays pinned, so rerendering a chunk does not repaint its inherited beginning.
+- You cannot change one chunk and keep all later chunks fixed: the overlap is carried forward. The continuation anchor (or full overlap in `latent_overlap` mode) stays pinned, so rerendering a chunk does not repaint its inherited beginning.
 - Reuse is an in-memory optimization, not a saved checkpoint or resume system. Restarting ComfyUI clears it. Cache eviction, changed inputs/model/sampling settings, or oversized entries can require earlier chunks to render again.
 - Stock guider objects with inspectable sampler/model settings support reuse. Opaque custom options, callbacks or patches bypass caching and still sample normally; patched workflows may rerender every chunk.
 - Chunk caching preserves output precision and is limited to **2 GiB** of CPU tensor storage. Encoded references have a separate **256 MiB / 64-entry** limit. Oversized entries are not cached.
 - The assembled latent is decoded again after sampling, even when earlier chunks are reused. Full-clip conditioning, the master latent, final decoding and output frames still need memory; chunking does not make arbitrarily long clips fit in RAM/VRAM.
-- Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. `chunk_frames` is the maximum window length: the last window can be shorter while keeping the normal overlap. All loaded reference frames are used; off-grid lengths generate up to **16 extra frames** to reach the next `17k+5` boundary (minimum 5). Output frames are sampled, not appended copies.
+- Motion, identity and lighting can still change at joins; overlap does not guarantee seamless or stutter-free video. `chunk_frames` is the window length (short clips use a single smaller window). The final window shifts backwards to stay full length, increasing its overlap. All loaded reference frames are used; off-grid lengths generate up to **16 extra frames** to reach the next `17k+5` boundary (minimum 5). The Chunked Sampler trims only grid padding after final decode, returning exactly the loaded source frame count. The loop workflow outputs assembled latents, so its external decode still includes grid padding.
 
-With 362 input frames, `chunk_frames = 124` and `overlap_frames = 22`, the windows
-are **0–123, 102–225, 204–327, 306–361**; the final window renders **56 frames**.
+With `five_frame_anchor`, 322 source frames generate 328 internally with windows
+**0–123, 119–242, 204–327**, then trim to 322 output frames. Anchoring adds VAE work between chunks.
+
+With `latent_overlap`, 362 input frames, `chunk_frames = 124` and `overlap_frames = 22`, the windows
+are **0–123, 102–225, 204–327, 238–361**; all windows render **124 frames**.
 A 361-frame input also targets 362 generated frames rather than dropping to 345.
-The H3 VAE still applies its own internal temporal padding when encoding references;
+The final reference repeats its last frame only to fill the generation grid before
+VAE encoding, keeping reference and target latent counts aligned. The H3 VAE also applies its internal temporal padding;
 this does not duplicate the rendered output. Frame counts refer to the actual images
 received from the loader, which may differ from source-video metadata after FPS conversion.
 - Generated audio is discarded. Connect the driving clip's audio to the video-saving node and match it to the retained video length; use **24 fps** for input and output.
@@ -212,7 +224,7 @@ received from the loader, which may differ from source-video metadata after FPS 
 
 Full node-by-node breakdown (sockets, slot order, resume rules, typical session): [docs/long_video_guide.md](docs/long_video_guide.md). Tested example workflow: [example_workflows/viggle-animate-h3_workflow-long-video-advanced.json](example_workflows/viggle-animate-h3_workflow-long-video-advanced.json).
 
-Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — no VAE input on the sampler, and a failure mid-run keeps every completed chunk:
+Four nodes turn the same windowed conditioning into a **graph-expanded loop** with disk checkpoints, so each chunk is decoded and saved through your own nodes while it is produced — a failure mid-run keeps every completed chunk. Connect the H3 VAE to **Sample Chunk** for five-frame anchors (already wired in the updated example):
 
 | Node | Purpose |
 |---|---|

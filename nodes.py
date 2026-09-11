@@ -38,6 +38,7 @@ def _send_progress(node_id, text):
 
 CANVAS_MULTIPLE = 32
 FPS = 24
+ANCHOR_FRAMES = 5
 MIN_ASPECT, MAX_ASPECT = 1 / 4, 4
 
 _LATENT_CACHE = collections.OrderedDict()
@@ -242,8 +243,8 @@ def _generation_frame_count(fc):
 def plan_spans(total_f, chunk_f, overlap_f):
     """Static window schedule: frames + latent placement.
 
-    Windows keep each start on latent phase 0 and preserve the overlap stride.
-    The final window uses only the remaining latents, including overlap.
+    Windows keep each start on latent phase 0. The final full-size window
+    shifts back to end at the generation boundary, increasing its overlap.
     Returns [(first_frame, last_frame, lat_start, lat_count), ...], covering
     every input frame, with the end rounded UP to the 17j+5 frame grid.
     """
@@ -257,14 +258,11 @@ def plan_spans(total_f, chunk_f, overlap_f):
     O = _frames_to_latents(max(5, int(overlap_f)))
     O = max(2, min(O, L - 5))          # stride stays a multiple of 5 (phase 0)
     stride = L - O
-    spans = []
-    start = 0
-    while True:
-        length = min(L, total_lat - start)
-        spans.append((_frame_at_latent(start), _frame_at_latent(start + length) - 1, start, length))
-        if start + length == total_lat:
-            return spans
-        start += stride
+    starts = list(range(0, total_lat - L + 1, stride))
+    last = total_lat - L
+    if starts[-1] != last:
+        starts.append(last)
+    return [(_frame_at_latent(s), _frame_at_latent(s + L) - 1, s, L) for s in starts]
 
 
 # Rendered-chunk cache. With carry, chunks are CHAINED: chunk i+1 pins the
@@ -308,7 +306,7 @@ def _chunk_cache_get(key, owners):
     if ent is None:
         return None
     refs, val = ent
-    if any(ref() is not owner for ref, owner in zip(refs, owners)):
+    if len(refs) != len(owners) or any(ref() is not owner for ref, owner in zip(refs, owners)):
         del _CHUNK_CACHE[key]
         return None
     _CHUNK_CACHE.move_to_end(key)
@@ -371,9 +369,12 @@ class ViggleAnimateConditioningWindowed:
             "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 32,
                                "tooltip": "Target height. 0 = driving clip's own height."}),
             "chunk_frames": ("INT", {"default": 124, "min": 22, "max": 3600, "step": 17,
-                                     "tooltip": "Maximum window length on H3's 17k+5 grid. The final window can be shorter. 124 is the usual baseline; shorter windows need visual testing."}),
+                                     "tooltip": "Maximum window length on H3's 17k+5 grid. The final window stays full length. 124 is the usual baseline."}),
             "overlap_frames": ("INT", {"default": 22, "min": 5, "max": 3600, "step": 17,
-                                       "tooltip": "Overlap carried from the preceding chunk and preserved during sampling. Clamped below the window length so each chunk generates new frames."}),
+                                       "tooltip": "Overlap for latent_overlap mode. five_frame_anchor always uses 5 frames; the final end-aligned window may overlap more."}),
+        }, "optional": {
+            "continuation": (["five_frame_anchor", "latent_overlap"], {"default": "five_frame_anchor",
+                              "tooltip": "Five decoded/re-encoded frames anchor each new window. latent_overlap restores the previous raw-latent carry for comparison."}),
         }}
 
     RETURN_TYPES = ("VIGGLE_COND_SET", "CONDITIONING")
@@ -384,7 +385,7 @@ class ViggleAnimateConditioningWindowed:
                    "for the Viggle Chunked Sampler. Carries overlap to improve continuity across long clips.")
 
     def build(self, cond_video, ref_image, text_cond, vae, width, height,
-              chunk_frames, overlap_frames):
+              chunk_frames, overlap_frames, continuation="five_frame_anchor"):
         # ---- frozen text conditioning -------------------------------------
         prompt_embeds = text_cond["prompt_embeds"]      # [1, 362, 5120] bf16
         text_token_tags = text_cond["text_token_tags"]  # [362] int64
@@ -407,7 +408,7 @@ class ViggleAnimateConditioningWindowed:
                          "generation grid, %d additional frames to generate; all loaded reference frames retained",
                          asked_f, total_f, total_f - asked_f)
 
-        spans = plan_spans(total_f, chunk_frames, overlap_frames)
+        spans = plan_spans(total_f, chunk_frames, ANCHOR_FRAMES if continuation == "five_frame_anchor" else overlap_frames)
 
         # ---- the still is encoded ONCE for all chunks ----------------------
         ih, iw = ref_image.shape[1], ref_image.shape[2]
@@ -431,7 +432,7 @@ class ViggleAnimateConditioningWindowed:
         for i, (a, b, _lat0, latn) in enumerate(spans):
             n = b - a + 1
             frames = cond_video[a:a + n]
-            vkey = _fingerprint(frames, ("v", n, rw, rh, id(vae)))
+            vkey = _fingerprint(frames, ("window_tail_pad_v1", n, rw, rh, id(vae)))
             z_video = _cache_get(vkey, vae)
             if z_video is None:
                 prefix = None
@@ -445,12 +446,18 @@ class ViggleAnimateConditioningWindowed:
                         prefix = previous[:, :, offset:offset + shared]
                         frames = frames[shared // 5 * 17:]
                         reused_blocks += shared // 5
+                missing = n - (min(a + n, asked_f) - a)
                 if (vh, vw) != (rh, rw):
                     frames = core_h3._resize(frames, rw, rh, "disabled")
+                if missing:
+                    # Match the target grid before H3 drops its three tail tokens.
+                    frames = torch.cat((frames, frames[-1:].repeat(missing, 1, 1, 1)), dim=0)
                 z_video = vae.encode(frames)
                 if prefix is not None:
                     z_video = torch.cat((prefix.to(z_video), z_video), dim=2)
                 _cache_put(vkey, vae, z_video)
+            if z_video.shape[2] != latn:
+                raise ValueError(f"Viggle: window {i + 1} reference has {z_video.shape[2]} temporal latents; expected {latn}.")
             video_block = {"kind": "video", "latent_t": z_video.shape[2],
                            "latent_h": rh // 16, "latent_w": rw // 16,
                            "ref_audio_t": 0, "latent": z_video, "audio_latent": None}
@@ -467,17 +474,29 @@ class ViggleAnimateConditioningWindowed:
         # guider_positive exists only so the guider's required `positive` socket
         # has a source — the sampler overwrites it per chunk from the cond_set.
         return ({"conds": conds, "prompts": prompts, "spans": spans,
-                 "total_frames": total_f, "canvas": (ch, cw)}, conds[0])
+                 "total_frames": total_f, "source_frames": asked_f, "continuation": continuation, "canvas": (ch, cw)}, conds[0])
+
+
+def _encode_anchor(vae, video, offset):
+    decoded = vae.decode(video)
+    if decoded.dim() == 5:
+        decoded = decoded.reshape(-1, *decoded.shape[-3:])
+    frames = decoded[offset:offset + ANCHOR_FRAMES].clone()
+    del decoded
+    if frames.shape[0] != ANCHOR_FRAMES or not torch.isfinite(frames).all():
+        raise ValueError("Viggle: continuation anchor needs five finite decoded frames.")
+    anchor = vae.encode(frames)
+    if anchor.shape[2] != 2 or not torch.isfinite(anchor).all():
+        raise ValueError("Viggle: H3 VAE must encode the five-frame anchor into two finite temporal latents.")
+    return anchor
 
 
 class ViggleChunkedSampler:
-    """Render a windowed Viggle clip chunk by chunk with LATENT CARRY.
+    """Render with five decoded/re-encoded anchor frames or raw latent overlap.
 
-    Chunk i's tail latents are written into a master latent and chunk i+1
-    samples with a denoise_mask that PINS the overlap to that content (the
-    model sees the carried rows as context at its cond timestep — core #15375).
-    The master decodes once at the end. Preserving overlap improves continuity;
-    motion and appearance in newly generated frames can still change at joins.
+    Anchor mode pins two temporal latents and accepts only newly generated
+    positions into the master. Larger final overlaps serve as warm-up context.
+    The master decodes once at the end; motion can still change at joins.
 
     Chunks are chained: chunk i+1 carries from chunk i, so cache keys chain
     too. Re-rendering chunk k (rerender_chunk + rerender_seed) re-renders
@@ -495,7 +514,7 @@ class ViggleChunkedSampler:
             "sampler": ("SAMPLER", {"tooltip": "From KSamplerSelect or RES4LYF — reused for every chunk."}),
             "sigmas": ("SIGMAS", {"tooltip": "The step schedule (BasicScheduler etc.) — every chunk runs the identical schedule."}),
             "cond_set": ("VIGGLE_COND_SET", {"tooltip": "From Viggle-Animate Conditioning (H3, Windowed)."}),
-            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE. Decodes the finished master latent once; the model's (silent) audio half is discarded — keep your driving clip's own audio at save time."}),
+            "vae": ("VAE", {"tooltip": "MiniMax-H3 video VAE. Decodes/re-encodes continuation anchors and decodes the finished master latent; the model's (silent) audio half is discarded — keep your driving clip's own audio at save time."}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                              "tooltip": "Base seed. Chunk i renders with seed + i, so the chunks vary independently while staying reproducible."}),
             "rerender_chunk": ("INT", {"default": 0, "min": 0, "max": 64, "step": 1,
@@ -508,7 +527,7 @@ class ViggleChunkedSampler:
     RETURN_NAMES = ("frames", "chunk_map")
     FUNCTION = "sample"
     CATEGORY = "sampling/viggle"
-    DESCRIPTION = ("Chunked Viggle-Animate sampler: latent carry for continuity, "
+    DESCRIPTION = ("Chunked Viggle-Animate sampler: five-frame anchors or latent overlap, "
                    "per-chunk cache and re-render.")
 
     def sample(self, guider, sampler, sigmas, cond_set, vae, seed,
@@ -525,7 +544,8 @@ class ViggleChunkedSampler:
         total_a = round(total_f / FPS * 40)
         model = guider.model_patcher
         noise = core_sampler.Noise_RandomNoise(int(seed))
-        owners = (model, guider, sampler)
+        anchor_mode = cond_set.get("continuation", "latent_overlap") == "five_frame_anchor"
+        owners = (model, guider, sampler, vae) if anchor_mode else (model, guider, sampler)
         sampling_key = self._sampling_key(noise, guider, sampler)
         dev = comfy.model_management.intermediate_device()
 
@@ -537,12 +557,13 @@ class ViggleChunkedSampler:
                      % (len(windows), total_f, total_f / FPS, ch, cw)]
         if sampling_key is None:
             chunk_map.append("Chunk reuse disabled: custom sampling state cannot be checked.")
-        prev_key = b""
+        prev_key = b"five_frame_anchor_v1" if anchor_mode else b""
         prev_end = None
+        anchor = None
         for i, (a, b, lat0, latn) in enumerate(windows):
             seed_i = int(rerender_seed) if int(rerender_chunk) == i + 1 else int(seed) + i
             seed_i %= 1 << 64
-            carry = 0 if prev_end is None else max(0, prev_end - lat0)
+            carry = (0 if anchor is None else anchor.shape[2]) if anchor_mode else (0 if prev_end is None else max(0, prev_end - lat0))
             chunk_map.append("#%d: frames %d-%d (%.1f-%.1fs) seed %d carry %d lat"
                              % (i + 1, a, b, a / FPS, (b + 1) / FPS, seed_i, carry))
             key = self._chunk_key(prev_key, sampling_key, conds[i], seed_i, ch, cw,
@@ -552,16 +573,32 @@ class ViggleChunkedSampler:
                            + ("cached" if cached is not None else "sampling"))
             chunk_map[-1] += " [cached]" if cached is not None else " [rendered]"
             if cached is None:
-                out_v, out_a = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
-                                                  seed_i, ch, cw, a, b, lat0, latn,
-                                                  carry, master_v, master_a)
+                if anchor_mode:
+                    v = torch.zeros_like(master_v[:, :, lat0:lat0 + latn])
+                    a0, a1 = round(a / FPS * 40), round((b + 1) / FPS * 40)
+                    au = torch.zeros_like(master_a[..., a0:a1])
+                    if anchor is not None:
+                        v[:, :, :carry] = anchor.to(v)
+                    out_v, out_a = self._sample_window(noise, guider, sampler, sigmas, conds[i],
+                                                       seed_i, ch, cw, a, b, carry, v, au)
+                else:
+                    out_v, out_a = self._render_chunk(noise, guider, sampler, sigmas, conds[i],
+                                                      seed_i, ch, cw, a, b, lat0, latn,
+                                                      carry, master_v, master_a)
                 _chunk_cache_put(key, owners, out_v, out_a)
             else:
                 out_v, out_a = cached
-                master_v[:, :, lat0:lat0 + latn] = out_v.to(dev)
+                if not anchor_mode:
+                    master_v[:, :, lat0:lat0 + latn] = out_v.to(dev)
                 a0 = min(round(a / FPS * 40), total_a)
                 a1 = min(round((b + 1) / FPS * 40), total_a)
                 master_a[:, :, :, a0:a1] = out_a.to(dev)
+            if anchor_mode:
+                local_start = max(0, (prev_end or 0) - lat0)
+                master_v[:, :, lat0 + local_start:lat0 + latn] = out_v[:, :, local_start:].to(dev)
+                if i + 1 < len(windows):
+                    _send_progress(progress_node, f"Chunk {i + 1} of {len(windows)}: preparing 5-frame anchor")
+                    anchor = _encode_anchor(vae, out_v.to(dev), windows[i + 1][0] - a)
             prev_key, prev_end = key, lat0 + latn
             pbar.update(1)
 
@@ -569,6 +606,11 @@ class ViggleChunkedSampler:
         frames = vae.decode(master_v)
         if frames.dim() == 5:  # combine batches
             frames = frames.reshape(-1, frames.shape[-3], frames.shape[-2], frames.shape[-1])
+        if "source_frames" in cond_set:
+            source_frames = int(cond_set["source_frames"])
+            if frames.shape[0] < source_frames:
+                raise ValueError("Viggle Chunked Sampler: final decode is shorter than the source video.")
+            frames = frames[:source_frames]
         _send_progress(progress_node, "Completed — final video decoded; downstream saving may follow")
         return (frames, "\n".join(chunk_map))
 

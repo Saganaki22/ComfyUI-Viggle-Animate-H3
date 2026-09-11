@@ -5,7 +5,7 @@
 This guide covers the
 long-clip path for Viggle-Animate: a driving clip of any length in, per-chunk
 sampling with the finetune's evaluated 124-frame window, previous output carried
-into each overlap, one final decode.
+through five decoded/re-encoded anchor frames, plus one final decode.
 
 Two ways to run it:
 
@@ -54,8 +54,9 @@ where the chunks are and what each of them conditions on.
 | `text_cond` | From the Load Text Conditioning node. |
 | `vae` | MiniMax-H3 video VAE (the base model's). Used to encode each window's footage and the still. |
 | `width` / `height` | `0` = the driving clip's own size (the evaluated configuration). Any other value rescales the canvas for every chunk. |
-| `chunk_frames` | Maximum window length (default 124; minimum configurable 22). Short clips and the final window use fewer frames when possible; lengths follow the temporal grid. |
-| `overlap_frames` | Frames carried from the preceding window and pinned (default 22). Clamped below the window length so every new window makes progress. The final window uses the same stride instead of shifting back to force a full window. |
+| `chunk_frames` | Maximum window length (default 124; minimum configurable 22). Short clips use fewer frames; longer clips keep full windows, including the final window. |
+| `continuation` | `five_frame_anchor` (default): five decoded/re-encoded frames, two pinned latents, 119-frame stride with 124-frame windows. `latent_overlap`: previous raw-latent carry for comparison. |
+| `overlap_frames` | Used only in `latent_overlap` mode. Frames carried from the preceding window and pinned (default 22). Clamped below the window length so every new window makes progress. The final window shifts back to end at the generation boundary, increasing its overlap. |
 
 **Outputs**
 
@@ -79,14 +80,21 @@ anyway; it is what makes the graph validate.
   full-window path.
 - The log line also prints the full window plan with 1-based chunk numbers.
 
-For 362 loaded frames with 124-frame windows and 22-frame overlap, expect
-**0–123, 102–225, 204–327, 306–361**. The last window is **56 frames**, including
-22 overlap frames and 34 new frames. For 345 frames, the final window is **39 frames**.
+In `five_frame_anchor` mode, 322 source frames use windows **0–123, 119–242, 204–327**
+on a 328-frame generation extent. The final overlap is larger, but only two latents
+are pinned; already accepted output is preserved. The Chunked Sampler trims to 322 frames.
+
+In `latent_overlap` mode, for 362 loaded frames with 124-frame windows and 22-frame overlap, expect
+**0–123, 102–225, 204–327, 238–361**. Every window is **124 frames**.
+For 345 frames, the final window is **221–344**.
 Inputs under 124 frames use a single shorter window on the same grid.
 
 For 361 loaded frames, generation extends to 362, while conditioning receives all
-361 original frames. We do not append repeated reference or output frames in these nodes;
-the H3 VAE retains its standard internal padding for partial encoding blocks.
+361 original frames plus one repeated final reference frame to match the generation
+grid before VAE encoding. This keeps reference and target temporal latent counts aligned.
+The repeated frame is conditioning padding, not an appended output frame.
+The Chunked Sampler trims the decoded padding back to 361 frames. The loop workflow
+returns latents and its external decode still includes grid padding.
 This preserves the loaded tail, but cannot recover a source frame lost by the loader.
 
 ---
@@ -96,8 +104,8 @@ This preserves the loaded tail, but cannot recover a source frame lost by the lo
 Its read-only live_progress box shows each chunk sampling or being reused from memory, then final decoding and completion. The chunk_map output remains the detailed report. This sampler does not save disk checkpoints.
 
 `ViggleChunkedSampler` — samples every chunk inside one node, carries the
-previous chunk's output into the overlap in latent space, assembles the master
-latent, and decodes once at the end.
+previous chunk's output through a five-frame VAE anchor (or raw overlap in
+`latent_overlap` mode), assembles the master latent, and decodes at the end.
 
 **Inputs**
 
@@ -105,7 +113,7 @@ latent, and decodes once at the end.
 |---|---|
 | `guider` / `sampler` / `sigmas` | Your existing sampling stack (SamplerCustomAdvanced-style sockets). Stock objects support chunk reuse; opaque custom ones bypass it and rerender everything. |
 | `cond_set` | From Windowed Conditioning. |
-| `vae` | Used for the single final decode of the assembled video. |
+| `vae` | Decodes/re-encodes continuation anchors and decodes the assembled video. |
 | `seed` | Base seed: chunk 1 uses `seed`, chunk 2 `seed + 1`, and so on. Standard noise is generated internally; remove old noise connections when updating. |
 | `rerender_chunk` | 1-based chunk whose seed you want to override; `0` disables the override. |
 | `rerender_seed` | Replacement seed for that chunk only. Zero itself is a valid seed. |
@@ -117,9 +125,11 @@ latent, and decodes once at the end.
 | 0 | `frames` | `IMAGE` — the finished clip, decoded once |
 | 1 | `chunk_map` | `STRING` — per-chunk report: frame range, seconds, effective seed, carry, `[cached]`/`[rendered]` |
 
-**How carry works.** Each chunk's first `overlap_frames` are pinned to the
-previous chunk's tail via a per-row denoise mask (present rows run at the
-conditioning timestep; pinned rows are injected near-clean). Because of this,
+**How carry works.** In `five_frame_anchor`, five decoded frames at the next
+window start are re-encoded and only their two H3 temporal latents are pinned.
+The rest of the new window starts empty; previously accepted positions are never
+overwritten during assembly. In `latent_overlap`, the whole overlapping latent
+section is copied and pinned. In both modes,
 chunks are chained: rerendering chunk k changes what k+1..end receive, so those
 resample; 1..k−1 come from cache. Changing a chunk's seed therefore never leaves
 later chunks independent of the change. Caching preserves output precision and is
@@ -153,7 +163,10 @@ your business in the loop body.
 | Input | Meaning |
 |---|---|
 | `state` | From Loop Start's `state` (slot 1). |
-| `guider` / `sampler` / `sigmas` | Your sampling stack. Sample Chunk creates standard random noise internally from its seed; no noise connection is needed. |
+| `guider` / `sampler` / `sigmas` | Your sampling stack. Connect the H3 VAE to Sample Chunk for `five_frame_anchor` mode. The updated
+example includes this connection; older loop workflows need this additional wire.
+
+Sample Chunk creates standard random noise internally from its seed; no noise connection is needed. |
 | `seed` | Base seed; chunk N uses `seed + N − 1`. |
 | `rerender_chunk` / `rerender_seed` | Same semantics as single-pass: override one chunk's seed; that chunk and everything after resamples, everything before restores from disk. |
 
@@ -179,6 +192,9 @@ Each iteration writes `chunk_NNNN_<fingerprint>.latent` plus an updated
 graph (loaders' files, node code), this chunk's conditioning, the sigmas, the
 window, canvas, effective seed and the predecessor chunk's fingerprint — so a
 changed setting silently becomes a new checkpoint file and old takes stay on disk.
+
+Connect the H3 VAE to Sample Chunk for `five_frame_anchor` mode. The updated
+example includes this connection; older loop workflows need this additional wire.
 
 Sample Chunk creates standard random noise internally from the effective chunk seed.
 It has no external noise input. When updating an older workflow, remove its old noise wire.
@@ -264,7 +280,7 @@ and any other missing nodes reported when loading the example.
 
 1. Load the desired driving clip at 24 fps (`force_rate = 24`; VHS `frame_load_cap = 0`
    loads the whole clip). Choose a matching reference still and the model/VAE/text files
-   described in the README. Start with 124-frame windows and 22-frame overlap.
+   described in the README. Start with 124-frame windows and `continuation = five_frame_anchor`.
 2. Connect Windowed Conditioning's `cond_set` to Start and `guider_positive` to the guider.
    Keep one Start, one Sample Chunk and one End; the window count controls repetition.
 3. Connect Start `state` → Sample Chunk `state`, Start `loop` → End `loop`, and
@@ -320,11 +336,11 @@ saved. After completion, queue unchanged to check that both restore. Then change
   for one chunk. Missing/invalid checkpoints produce an error instead of silent substitution.
 - **Why did everything resample?** Check `resume`, run name, base seed, conditioning,
   sampling settings and model files. Code updates also change checkpoint fingerprints.
-- **Does rerender repaint the whole chunk?** Its inherited overlap stays pinned. Changing
+- **Does rerender repaint the whole chunk?** Its five-frame anchor stays pinned (the full overlap in `latent_overlap` mode). Changing
   chunk k changes the carry into k+1 onward; unchanged overrides can reuse a matching take.
 - **Why does the end deform or stutter?** Carry does not guarantee identity or seamless
   motion. Review the driving motion/reference and individual chunks. The final window
-  may be shorter; test motion and identity quality locally. More sigma points do not guarantee an improvement.
+  now stays full length; test motion and identity quality locally. More sigma points do not guarantee an improvement.
 - **Why is memory/encoding still high?** The full input and conditioning still occupy memory,
   the execution cache can retain decoded previews, and final assembly needs a full latent
   and decode. Use shorter shots or a smaller canvas when those stages exceed available memory.
